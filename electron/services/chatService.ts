@@ -4,7 +4,6 @@ import * as path from 'path'
 import * as fs from 'fs'
 import * as https from 'https'
 import * as http from 'http'
-import * as fzstd from 'fzstd'
 import * as crypto from 'crypto'
 import { app, BrowserWindow, dialog } from 'electron'
 import { ConfigService } from './config'
@@ -18,330 +17,84 @@ import { voiceTranscribeService } from './voiceTranscribeService'
 import { imageDecryptService } from './imageDecryptService'
 import { CONTACT_REGION_LOOKUP_DATA } from './contactRegionLookupData'
 import { LRUCache } from '../utils/LRUCache.js'
+import { emojiCache, emojiDownloading, FRIEND_EXCLUDE_USERNAMES } from './chat/constants'
+import { cleanAccountDirName } from './chat/accountUtils'
+import {
+  buildMessageKey,
+  buildIdentityKeys,
+  coerceRowNumber,
+  compareMessagesByTimeline,
+  encodeMessageKeySegment,
+  getMessageSourceInfo,
+  getRowField,
+  getRowInt,
+  getRowTimestampSeconds,
+  normalizeMessageOrder,
+  normalizeTimestampLikeToSeconds,
+  normalizeUnsignedIntegerToken,
+  parseCompactDateTimeDigitsToSeconds,
+  parseDateTimeTextToSeconds,
+  resolveMessageIsSend
+} from './chat/messageRowUtils'
+import {
+  mapRowsToMessages,
+  mapRowsToMessagesLite
+} from './chat/messageMapper'
+import {
+  cleanString,
+  cleanUtf16,
+  compactEncodedPayload,
+  decodeBinaryContent,
+  decodeHtmlEntities,
+  decodeMaybeCompressed,
+  decodeMessageContent,
+  extractType49XmlTypeForStats,
+  extractXmlValue,
+  extractSenderUsernameFromContent,
+  getMessageTypeLabel,
+  looksLikeHex,
+  looksLikeBase64,
+  parseCardInfo,
+  parseEmojiInfo,
+  parseImageDatNameFromRow,
+  parseMessageContent,
+  parseType49Message,
+  parseImageInfo,
+  parseVideoFileNameFromRow,
+  sanitizeQuotedContent,
+  stripSenderPrefix
+} from './chat/messageParsing'
+import { MyFootprintService } from './chat/myFootprintService'
+import type { MyFootprintHost } from './chat/myFootprintHost'
+import { normalizeTimestampSeconds } from './chat/timeUtils'
 
-export interface ChatSession {
-  username: string
-  type: number
-  unreadCount: number
-  summary: string
-  sortTimestamp: number  // 用于排序
-  lastTimestamp: number  // 用于显示时间
-  lastMsgType: number
-  messageCountHint?: number
-  displayName?: string
-  avatarUrl?: string
-  lastMsgSender?: string
-  lastSenderDisplayName?: string
-  selfWxid?: string
-  isFolded?: boolean  // 是否已折叠进"折叠的群聊"
-  isMuted?: boolean   // 是否开启免打扰
-}
 
-export interface Message {
-  messageKey: string
-  localId: number
-  serverId: number
-  serverIdRaw?: string
-  localType: number
-  createTime: number
-  sortSeq: number
-  isSend: number | null
-  senderUsername: string | null
-  parsedContent: string
-  rawContent: string
-  content?: string  // 原始XML内容（与rawContent相同，供前端使用）
-  // 表情包相关
-  emojiCdnUrl?: string
-  emojiMd5?: string
-  emojiLocalPath?: string  // 本地缓存 castle 路径
-  emojiThumbUrl?: string
-  emojiEncryptUrl?: string
-  emojiAesKey?: string
-  // 引用消息相关
-  quotedContent?: string
-  quotedSender?: string
-  // 图片/视频相关
-  imageMd5?: string
-  imageOriginSourceMd5?: string
-  imageDatName?: string
-  videoMd5?: string
-  aesKey?: string
-  encrypVer?: number
-  cdnThumbUrl?: string
-  voiceDurationSeconds?: number
-  // Type 49 细分字段
-  linkTitle?: string        // 链接/文件标题
-  linkUrl?: string          // 链接 URL
-  linkThumb?: string        // 链接缩略图
-  fileName?: string         // 文件名
-  fileSize?: number         // 文件大小
-  fileExt?: string          // 文件扩展名
-  fileMd5?: string          // 文件 MD5
-  xmlType?: string          // XML 中的 type 字段
-  appMsgKind?: string       // 归一化 appmsg 类型
-  appMsgDesc?: string
-  appMsgAppName?: string
-  appMsgSourceName?: string
-  appMsgSourceUsername?: string
-  appMsgThumbUrl?: string
-  appMsgMusicUrl?: string
-  appMsgDataUrl?: string
-  appMsgLocationLabel?: string
-  finderNickname?: string
-  finderUsername?: string
-  finderCoverUrl?: string
-  finderAvatar?: string
-  finderDuration?: number
-  // 位置消息
-  locationLat?: number
-  locationLng?: number
-  locationPoiname?: string
-  locationLabel?: string
-  // 音乐消息
-  musicAlbumUrl?: string
-  musicUrl?: string
-  // 礼物消息
-  giftImageUrl?: string
-  giftWish?: string
-  giftPrice?: string
-  // 名片消息
-  cardUsername?: string     // 名片的微信ID
-  cardNickname?: string     // 名片的昵称
-  cardAvatarUrl?: string    // 名片头像 URL
-  // 转账消息
-  transferPayerUsername?: string   // 转账付款人
-  transferReceiverUsername?: string // 转账收款人
-  // 聊天记录
-  chatRecordTitle?: string  // 聊天记录标题
-  chatRecordList?: Array<{
-    datatype: number
-    sourcename: string
-    sourcetime: string
-    sourceheadurl?: string
-    datadesc?: string
-    datatitle?: string
-    fileext?: string
-    datasize?: number
-    messageuuid?: string
-    dataurl?: string
-    datathumburl?: string
-    datacdnurl?: string
-    cdndatakey?: string
-    cdnthumbkey?: string
-    aeskey?: string
-    md5?: string
-    fullmd5?: string
-    thumbfullmd5?: string
-    srcMsgLocalid?: number
-    imgheight?: number
-    imgwidth?: number
-    duration?: number
-    chatRecordTitle?: string
-    chatRecordDesc?: string
-    chatRecordList?: any[]
-  }>
-  _db_path?: string // 内部字段：记录消息所属数据库路径
-}
+import type {
+  ChatSession,
+  Contact,
+  ContactInfo,
+  ExportSessionStats,
+  ExportSessionStatsCacheMeta,
+  ExportSessionStatsOptions,
+  ExportTabCounts,
+  GetContactsOptions,
+  Message,
+  MyFootprintData,
+  MyFootprintDiagnostics,
+  MyFootprintMentionGroup,
+  MyFootprintMentionItem,
+  MyFootprintPrivateSegment,
+  MyFootprintPrivateSession,
+  MyFootprintSummary,
+  ResourceMessageItem,
+  ResourceMessageType,
+  SessionDetail,
+  SessionDetailExtra,
+  SessionDetailFast,
+  SyntheticUnreadState
+} from './chat/types'
 
-type ResourceMessageType = 'image' | 'video' | 'voice' | 'file'
-
-interface ResourceMessageItem extends Message {
-  sessionId: string
-  sessionDisplayName?: string
-  resourceType: ResourceMessageType
-}
-
-export interface Contact {
-  username: string
-  alias: string
-  remark: string
-  nickName: string
-}
-
-export interface ContactInfo {
-  username: string
-  displayName: string
-  remark?: string
-  nickname?: string
-  alias?: string
-  labels?: string[]
-  detailDescription?: string
-  region?: string
-  avatarUrl?: string
-  type: 'friend' | 'group' | 'official' | 'former_friend' | 'other'
-}
-
-interface GetContactsOptions {
-  lite?: boolean
-}
-
-interface ExportSessionStats {
-  totalMessages: number
-  voiceMessages: number
-  imageMessages: number
-  videoMessages: number
-  emojiMessages: number
-  transferMessages: number
-  redPacketMessages: number
-  callMessages: number
-  firstTimestamp?: number
-  lastTimestamp?: number
-  privateMutualGroups?: number
-  groupMemberCount?: number
-  groupMyMessages?: number
-  groupActiveSpeakers?: number
-  groupMutualFriends?: number
-}
-
-interface ExportSessionStatsOptions {
-  includeRelations?: boolean
-  forceRefresh?: boolean
-  allowStaleCache?: boolean
-  preferAccurateSpecialTypes?: boolean
-  cacheOnly?: boolean
-  beginTimestamp?: number
-  endTimestamp?: number
-}
-
-interface ExportSessionStatsCacheMeta {
-  updatedAt: number
-  stale: boolean
-  includeRelations: boolean
-  source: 'memory' | 'disk' | 'fresh'
-}
-
-interface ExportTabCounts {
-  private: number
-  group: number
-  official: number
-  former_friend: number
-}
-
-interface SessionDetailFast {
-  wxid: string
-  displayName: string
-  remark?: string
-  nickName?: string
-  alias?: string
-  avatarUrl?: string
-  messageCount: number
-}
-
-interface SessionDetailExtra {
-  firstMessageTime?: number
-  latestMessageTime?: number
-  messageTables: { dbName: string; tableName: string; count: number }[]
-}
-
-type SessionDetail = SessionDetailFast & SessionDetailExtra
-
-interface SyntheticUnreadState {
-  readTimestamp: number
-  scannedTimestamp: number
-  latestTimestamp: number
-  unreadCount: number
-  summaryTimestamp?: number
-  summary?: string
-  lastMsgType?: number
-}
-
-interface MyFootprintSummary {
-  private_inbound_people: number
-  private_replied_people: number
-  private_outbound_people: number
-  private_reply_rate: number
-  mention_count: number
-  mention_group_count: number
-}
-
-interface MyFootprintPrivateSession {
-  session_id: string
-  incoming_count: number
-  outgoing_count: number
-  replied: boolean
-  first_incoming_ts: number
-  first_reply_ts: number
-  latest_ts: number
-  anchor_local_id: number
-  anchor_create_time: number
-  displayName?: string
-  avatarUrl?: string
-}
-
-interface MyFootprintPrivateSegment {
-  session_id: string
-  segment_index: number
-  start_ts: number
-  end_ts: number
-  duration_sec: number
-  incoming_count: number
-  outgoing_count: number
-  message_count: number
-  replied: boolean
-  first_incoming_ts: number
-  first_reply_ts: number
-  latest_ts: number
-  anchor_local_id: number
-  anchor_create_time: number
-  displayName?: string
-  avatarUrl?: string
-}
-
-interface MyFootprintMentionItem {
-  session_id: string
-  local_id: number
-  create_time: number
-  sender_username: string
-  message_content: string
-  source: string
-  sessionDisplayName?: string
-  senderDisplayName?: string
-  senderAvatarUrl?: string
-}
-
-interface MyFootprintMentionGroup {
-  session_id: string
-  count: number
-  latest_ts: number
-  displayName?: string
-  avatarUrl?: string
-}
-
-interface MyFootprintDiagnostics {
-  truncated: boolean
-  scanned_dbs: number
-  elapsed_ms: number
-  mention_truncated?: boolean
-  private_truncated?: boolean
-  native_ms?: number
-  source_filter_ms?: number
-  fallback_ms?: number
-  enrich_ms?: number
-  pipeline_ms?: number
-  fallback_used?: boolean
-  private_limit_effective?: number
-  mention_candidate_limit?: number
-  native_mention_candidates?: number
-  source_filtered_mentions?: number
-  private_session_count?: number
-  group_session_count?: number
-  native_passes?: number
-  native_group_chunks?: number
-}
-
-interface MyFootprintData {
-  summary: MyFootprintSummary
-  private_sessions: MyFootprintPrivateSession[]
-  private_segments: MyFootprintPrivateSegment[]
-  mentions: MyFootprintMentionItem[]
-  mention_groups: MyFootprintMentionGroup[]
-  diagnostics: MyFootprintDiagnostics
-}
-
-// 表情包缓存
-const emojiCache: Map<string, string> = new Map()
-const emojiDownloading: Map<string, Promise<string | null>> = new Map()
-const FRIEND_EXCLUDE_USERNAMES = new Set(['medianote', 'floatbottle', 'qmessage', 'qqmail', 'fmessage'])
+export type { ChatSession, Contact, ContactInfo, Message } from './chat/types'
 
 class ChatService {
   private configService: ConfigService
@@ -438,6 +191,7 @@ class ChatService {
   private readonly contactsMemoryCacheTtlMs = 3 * 60 * 1000
   private readonly contactDisplayNameCollator = new Intl.Collator('zh-CN')
   private readonly slowGetContactsLogThresholdMs = 1200
+  private readonly myFootprintService: MyFootprintService
 
   constructor() {
     this.configService = new ConfigService()
@@ -450,29 +204,33 @@ class ChatService {
     // 初始化LRU缓存，限制大小防止内存泄漏
     this.voiceWavCache = new LRUCache(this.voiceWavCacheMaxEntries)
     this.voiceTranscriptCache = new LRUCache(1000) // 最多缓存1000条转写记录
+    this.myFootprintService = new MyFootprintService(this.createMyFootprintHost())
+  }
+
+  private createMyFootprintHost(): MyFootprintHost {
+    return {
+      ensureConnected: () => this.ensureConnected(),
+      getMyWxidCleaned: () => String(this.configService.getMyWxidCleaned() || '').trim(),
+      getConfig: (key: string) => this.configService.get(key),
+      getSessions: () => this.getSessions(),
+      getSessionMessageTables: (sessionId) => this.getSessionMessageTables(sessionId),
+      getMessageById: (sessionId, localId) => this.getMessageById(sessionId, localId),
+      parseMessage: (row, options) => this.parseMessage(row, options),
+      enrichSessionsContactInfo: (usernames, options) => this.enrichSessionsContactInfo(usernames, options),
+      quoteSqlIdentifier: (identifier) => this.quoteSqlIdentifier(identifier),
+      getSessionLocalType: (row) => this.getSessionLocalType(row),
+      loadContactLocalTypeMapForEnterpriseOpenim: (usernames) =>
+        this.loadContactLocalTypeMapForEnterpriseOpenim(usernames),
+      isEnterpriseOpenimUsername: (username) => this.isEnterpriseOpenimUsername(username),
+      shouldKeepSession: (username, localType) => this.shouldKeepSession(username, localType),
+      escapeSqlString: (value) => this.escapeSqlString(value),
+      resolveMessageSenderUsernameById: (dbPath, senderId) =>
+        this.resolveMessageSenderUsernameById(dbPath, senderId)
+    }
   }
 
   setRuntimeConfig(config: { dbPath?: string; decryptKey?: string; myWxid?: string }): void {
     this.runtimeConfig = config
-  }
-
-  /**
-   * 清理账号目录名
-   */
-  private cleanAccountDirName(dirName: string): string {
-    const trimmed = dirName.trim()
-    if (!trimmed) return trimmed
-
-    if (trimmed.toLowerCase().startsWith('wxid_')) {
-      const match = trimmed.match(/^(wxid_[^_]+)/i)
-      if (match) return match[1]
-      return trimmed
-    }
-
-    const suffixMatch = trimmed.match(/^(.+)_([a-zA-Z0-9]{4})$/)
-    const cleaned = suffixMatch ? suffixMatch[1] : trimmed
-
-    return cleaned
   }
 
   /**
@@ -887,7 +645,7 @@ class ChatService {
           10
         )
 
-        const summary = this.cleanString(row.summary || row.digest || row.last_msg || row.lastMsg || '')
+        const summary = cleanString(row.summary || row.digest || row.last_msg || row.lastMsg || '')
         const lastMsgType = parseInt(row.last_msg_type || row.lastMsgType || '0', 10)
         const messageCountHintRaw =
           row.message_count ??
@@ -918,7 +676,7 @@ class ChatService {
           username,
           type: parseInt(row.type || '0', 10),
           unreadCount: parseInt(row.unread_count || row.unreadCount || row.unreadcount || '0', 10),
-          summary: summary || this.getMessageTypeLabel(lastMsgType),
+          summary: summary || getMessageTypeLabel(lastMsgType),
           sortTimestamp: sortTs,
           lastTimestamp: lastTs,
           lastMsgType,
@@ -1013,7 +771,7 @@ class ChatService {
     if (username.endsWith('@chatroom')) return true
     if (username.startsWith('gh_')) return false
 
-    const localType = this.getRowInt(row, ['local_type', 'localType', 'WCDB_CT_local_type'], Number.NaN)
+    const localType = getRowInt(row, ['local_type', 'localType', 'WCDB_CT_local_type'], Number.NaN)
     const lowered = username.toLowerCase()
     if (this.isEnterpriseOpenimUsername(username)) {
       return this.isAllowedEnterpriseOpenimByLocalType(username, localType)
@@ -1109,7 +867,7 @@ class ChatService {
         String(sortTs),
         10
       )
-      const summary = this.cleanString(row.summary || row.digest || row.last_msg || row.lastMsg || '')
+      const summary = cleanString(row.summary || row.digest || row.last_msg || row.lastMsg || '')
       const lastMsgType = parseInt(row.last_msg_type || row.lastMsgType || '0', 10)
       const cached = this.avatarCache.get(username)
       const contact = contactMap.get(username)
@@ -1118,7 +876,7 @@ class ChatService {
         username,
         type: parseInt(row.type || '0', 10),
         unreadCount: parseInt(row.unread_count || row.unreadCount || row.unreadcount || '0', 10),
-        summary: summary || this.getMessageTypeLabel(lastMsgType),
+        summary: summary || getMessageTypeLabel(lastMsgType),
         sortTimestamp: sortTs,
         lastTimestamp: lastTs,
         lastMsgType,
@@ -1172,7 +930,7 @@ class ChatService {
         const username = String(row.username || '').trim()
         if (!username || existing.has(username)) continue
         const lowered = username.toLowerCase()
-        const localType = this.getRowInt(row, ['local_type', 'localType', 'WCDB_CT_local_type'], Number.NaN)
+        const localType = getRowInt(row, ['local_type', 'localType', 'WCDB_CT_local_type'], Number.NaN)
         const isOfficial = username.startsWith('gh_')
         const isSpecialWeixin = lowered.startsWith('weixin') && lowered !== 'weixin'
         const isSpecialOpenim = this.isAllowedEnterpriseOpenimByLocalType(username, localType)
@@ -1347,10 +1105,10 @@ class ChatService {
         summary = message.linkTitle || message.fileName || message.parsedContent || '[消息]'
         break
       default:
-        summary = message.parsedContent || message.rawContent || this.getMessageTypeLabel(Number(message.localType || 0))
+        summary = message.parsedContent || message.rawContent || getMessageTypeLabel(Number(message.localType || 0))
         break
     }
-    return cleanOfficialPrefix(this.cleanString(summary))
+    return cleanOfficialPrefix(cleanString(summary))
   }
 
   private async getInitialSyntheticUnreadState(sessionId: string, latestTimestamp: number): Promise<{
@@ -2128,8 +1886,8 @@ class ChatService {
         if (!username) continue
 
         let type: 'friend' | 'group' | 'official' | 'former_friend' | 'other' = 'other'
-        const localType = this.getRowInt(row, ['local_type', 'localType', 'WCDB_CT_local_type'], 0)
-        const quanPin = String(this.getRowField(row, ['quan_pin', 'quanPin', 'WCDB_CT_quan_pin']) || '').trim()
+        const localType = getRowInt(row, ['local_type', 'localType', 'WCDB_CT_local_type'], 0)
+        const quanPin = String(getRowField(row, ['quan_pin', 'quanPin', 'WCDB_CT_quan_pin']) || '').trim()
         const loweredUsername = username.toLowerCase()
         const isOpenimEnterprise = this.isEnterpriseOpenimUsername(username)
         if (isOpenimEnterprise && !this.isAllowedEnterpriseOpenimByLocalType(username, localType)) {
@@ -2529,7 +2287,7 @@ class ChatService {
     const rawRows = result.messages as Record<string, any>[]
     const hasMore = rawRows.length > pageLimit
     const selectedRows = hasMore ? rawRows.slice(0, pageLimit) : rawRows
-    const mapped = this.mapRowsToMessages(selectedRows, sessionId)
+    const mapped = mapRowsToMessages(selectedRows, sessionId, String(this.configService.getMyWxidCleaned() || '').trim())
     const visible = mapped.filter((msg) => this.isMessageVisibleForSession(sessionId, msg))
     const outputMessages = (visible.length === 0 && mapped.length > 0)
       ? mapped
@@ -2537,7 +2295,7 @@ class ChatService {
     if (visible.length === 0 && mapped.length > 0) {
       console.warn(`[ChatService] getMessagesByOffsetStable 可见性过滤回退: session=${sessionId} mapped=${mapped.length}`)
     }
-    const normalized = this.normalizeMessageOrder(outputMessages)
+    const normalized = normalizeMessageOrder(outputMessages)
     if (normalized.length > 0) {
       await this.repairEmojiMessages(normalized)
       await this.resolveQuotedMessages(normalized, sessionId)
@@ -2597,8 +2355,8 @@ class ChatService {
       }
 
       // 转换为 Message 对象
-      const messages = this.mapRowsToMessages(res.messages as Record<string, any>[], sessionId)
-      const normalized = this.normalizeMessageOrder(messages)
+      const messages = mapRowsToMessages(res.messages as Record<string, any>[], sessionId, String(this.configService.getMyWxidCleaned() || '').trim())
+      const normalized = normalizeMessageOrder(messages)
 
       // 并发检查并修复缺失 CDN URL 的表情包
       const fixPromises: Promise<void>[] = []
@@ -2616,117 +2374,6 @@ class ChatService {
       console.error('ChatService: 获取增量消息失败:', e)
       return { success: false, error: String(e) }
     }
-  }
-
-  private compareMessagesByTimeline(a: Message, b: Message): number {
-    const aSortSeq = Math.max(0, Number(a.sortSeq || 0))
-    const bSortSeq = Math.max(0, Number(b.sortSeq || 0))
-    const aCreateTime = Math.max(0, Number(a.createTime || 0))
-    const bCreateTime = Math.max(0, Number(b.createTime || 0))
-    const aLocalId = Math.max(0, Number(a.localId || 0))
-    const bLocalId = Math.max(0, Number(b.localId || 0))
-    const aServerId = Math.max(0, Number(a.serverId || 0))
-    const bServerId = Math.max(0, Number(b.serverId || 0))
-
-    // 与 C++ 侧归并规则一致：当两侧都有 sortSeq 时优先 sortSeq，否则先看 createTime。
-    if (aSortSeq > 0 && bSortSeq > 0 && aSortSeq !== bSortSeq) {
-      return aSortSeq - bSortSeq
-    }
-    if (aCreateTime !== bCreateTime) {
-      return aCreateTime - bCreateTime
-    }
-    if (aSortSeq !== bSortSeq) {
-      return aSortSeq - bSortSeq
-    }
-    if (aLocalId !== bLocalId) {
-      return aLocalId - bLocalId
-    }
-    if (aServerId !== bServerId) {
-      return aServerId - bServerId
-    }
-
-    const aKey = String(a.messageKey || '')
-    const bKey = String(b.messageKey || '')
-    if (aKey < bKey) return -1
-    if (aKey > bKey) return 1
-    return 0
-  }
-
-  private normalizeMessageOrder(messages: Message[]): Message[] {
-    if (messages.length < 2) return messages
-
-    const withIndex = messages.map((msg, index) => ({ msg, index }))
-    withIndex.sort((left, right) => {
-      const diff = this.compareMessagesByTimeline(left.msg, right.msg)
-      if (diff !== 0) return diff
-      return left.index - right.index
-    })
-
-    let changed = false
-    for (let index = 0; index < withIndex.length; index += 1) {
-      if (withIndex[index].msg !== messages[index]) {
-        changed = true
-        break
-      }
-    }
-    if (!changed) return messages
-    return withIndex.map((entry) => entry.msg)
-  }
-
-  private encodeMessageKeySegment(value: unknown): string {
-    const normalized = String(value ?? '').trim()
-    return encodeURIComponent(normalized)
-  }
-
-  private getMessageSourceInfo(row: Record<string, any>): { dbName?: string; tableName?: string; dbPath?: string } {
-    const dbPath = String(row._db_path || row.db_path || '').trim()
-    const explicitDbName = String(row.db_name || '').trim()
-    const tableName = String(row.table_name || '').trim()
-    const dbName = explicitDbName || (dbPath ? basename(dbPath, extname(dbPath)) : '')
-    return {
-      dbName: dbName || undefined,
-      tableName: tableName || undefined,
-      dbPath: dbPath || undefined
-    }
-  }
-
-  private buildMessageKey(input: {
-    localId: number
-    serverId: number
-    createTime: number
-    sortSeq: number
-    senderUsername?: string | null
-    localType: number
-    dbName?: string
-    tableName?: string
-    dbPath?: string
-  }): string {
-    const localId = Number.isFinite(input.localId) ? Math.max(0, Math.floor(input.localId)) : 0
-    const serverId = Number.isFinite(input.serverId) ? Math.max(0, Math.floor(input.serverId)) : 0
-    const createTime = Number.isFinite(input.createTime) ? Math.max(0, Math.floor(input.createTime)) : 0
-    const sortSeq = Number.isFinite(input.sortSeq) ? Math.max(0, Math.floor(input.sortSeq)) : 0
-    const localType = Number.isFinite(input.localType) ? Math.floor(input.localType) : 0
-    const senderUsername = this.encodeMessageKeySegment(input.senderUsername || '')
-    const dbPath = String(input.dbPath || '').trim()
-    const dbName = String(input.dbName || '').trim() || (input.dbPath ? basename(input.dbPath, extname(input.dbPath)) : '')
-    const tableName = String(input.tableName || '').trim()
-    const sourceScope = dbPath || dbName
-
-    if (localId > 0 && sourceScope && tableName) {
-      return `${this.encodeMessageKeySegment(sourceScope)}:${this.encodeMessageKeySegment(tableName)}:${localId}`
-    }
-
-    if (localId > 0 && sourceScope) {
-      // 当底层未返回 table_name 时，避免使用 db:_:localId（会误并同库不同表的消息）。
-      return `local:${this.encodeMessageKeySegment(sourceScope)}:${localId}:${createTime}:${sortSeq}:${senderUsername}:${localType}`
-    }
-
-    if (serverId > 0) {
-      const scopedServer = sourceScope ? `${this.encodeMessageKeySegment(sourceScope)}:${serverId}` : String(serverId)
-      return `server:${scopedServer}:${createTime}:${sortSeq}:${localId}:${senderUsername}:${localType}`
-    }
-
-    return `fallback:${this.encodeMessageKeySegment(sourceScope)}:${createTime}:${sortSeq}:${localId}:${senderUsername}:${localType}`
   }
 
   private logVisibilityAnomaly(sessionId: string, msg: Message): void {
@@ -2834,7 +2481,7 @@ class ChatService {
 
       const rowsToProcess = queuedRows
       queuedRows = []
-      const mappedMessages = this.mapRowsToMessages(rowsToProcess, sessionId)
+      const mappedMessages = mapRowsToMessages(rowsToProcess, sessionId, String(this.configService.getMyWxidCleaned() || '').trim())
       for (let index = 0; index < mappedMessages.length; index += 1) {
         const msg = mappedMessages[index]
         rawRowsConsumed += 1
@@ -2876,7 +2523,7 @@ class ChatService {
       )
     }
 
-    const normalized = this.normalizeMessageOrder(outputMessages)
+    const normalized = normalizeMessageOrder(outputMessages)
     if (normalized.length > 0) {
       await this.repairEmojiMessages(normalized)
     }
@@ -2888,119 +2535,6 @@ class ChatService {
       filteredOut,
       bufferedRows: queuedRows.length > 0 ? queuedRows : undefined
     }
-  }
-
-  private getRowField(row: Record<string, any>, keys: string[]): any {
-    for (const key of keys) {
-      if (row[key] !== undefined && row[key] !== null) return row[key]
-    }
-    const lowerMap = new Map<string, string>()
-    for (const actual of Object.keys(row)) {
-      lowerMap.set(actual.toLowerCase(), actual)
-    }
-    for (const key of keys) {
-      const actual = lowerMap.get(key.toLowerCase())
-      if (actual && row[actual] !== undefined && row[actual] !== null) {
-        return row[actual]
-      }
-    }
-    return undefined
-  }
-
-  private getRowInt(row: Record<string, any>, keys: string[], fallback = 0): number {
-    const raw = this.getRowField(row, keys)
-    if (raw === undefined || raw === null || raw === '') return fallback
-    const parsed = this.coerceRowNumber(raw)
-    return Number.isFinite(parsed) ? parsed : fallback
-  }
-
-  private parseCompactDateTimeDigitsToSeconds(raw: string): number {
-    const text = String(raw || '').trim()
-    if (!/^\d{8}(?:\d{4}(?:\d{2})?)?$/.test(text)) return 0
-
-    const year = Number.parseInt(text.slice(0, 4), 10)
-    const month = Number.parseInt(text.slice(4, 6), 10)
-    const day = Number.parseInt(text.slice(6, 8), 10)
-    const hour = text.length >= 12 ? Number.parseInt(text.slice(8, 10), 10) : 0
-    const minute = text.length >= 12 ? Number.parseInt(text.slice(10, 12), 10) : 0
-    const second = text.length >= 14 ? Number.parseInt(text.slice(12, 14), 10) : 0
-
-    if (!Number.isFinite(year) || year < 1990 || year > 2200) return 0
-    if (!Number.isFinite(month) || month < 1 || month > 12) return 0
-    if (!Number.isFinite(day) || day < 1 || day > 31) return 0
-    if (!Number.isFinite(hour) || hour < 0 || hour > 23) return 0
-    if (!Number.isFinite(minute) || minute < 0 || minute > 59) return 0
-    if (!Number.isFinite(second) || second < 0 || second > 59) return 0
-
-    const dt = new Date(year, month - 1, day, hour, minute, second)
-    if (
-      dt.getFullYear() !== year ||
-      dt.getMonth() !== month - 1 ||
-      dt.getDate() !== day ||
-      dt.getHours() !== hour ||
-      dt.getMinutes() !== minute ||
-      dt.getSeconds() !== second
-    ) {
-      return 0
-    }
-    const ts = Math.floor(dt.getTime() / 1000)
-    return Number.isFinite(ts) && ts > 0 ? ts : 0
-  }
-
-  private parseDateTimeTextToSeconds(raw: unknown): number {
-    const text = String(raw ?? '').trim()
-    if (!text) return 0
-
-    const compactDigits = this.parseCompactDateTimeDigitsToSeconds(text)
-    if (compactDigits > 0) return compactDigits
-
-    if (/[zZ]|[+-]\d{2}:?\d{2}$/.test(text)) {
-      const parsed = Date.parse(text)
-      const seconds = Math.floor(parsed / 1000)
-      if (Number.isFinite(seconds) && seconds > 0) return seconds
-    }
-
-    const normalized = text.replace('T', ' ').replace(/\.\d+$/, '').replace(/\//g, '-')
-    const match = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?$/)
-    if (!match) return 0
-
-    const year = Number.parseInt(match[1], 10)
-    const month = Number.parseInt(match[2], 10)
-    const day = Number.parseInt(match[3], 10)
-    const hour = Number.parseInt(match[4] || '0', 10)
-    const minute = Number.parseInt(match[5] || '0', 10)
-    const second = Number.parseInt(match[6] || '0', 10)
-    if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return 0
-    const dt = new Date(year, month - 1, day, hour, minute, second)
-    const ts = Math.floor(dt.getTime() / 1000)
-    return Number.isFinite(ts) && ts > 0 ? ts : 0
-  }
-
-  private normalizeTimestampLikeToSeconds(raw: unknown): number {
-    if (raw === undefined || raw === null || raw === '') return 0
-    const text = String(raw ?? '').trim()
-    if (!text) return 0
-
-    const compactDigits = this.parseCompactDateTimeDigitsToSeconds(text)
-    if (compactDigits > 0) return compactDigits
-
-    const parsed = this.coerceRowNumber(raw)
-    if (Number.isFinite(parsed) && parsed > 0) {
-      let normalized = Math.floor(parsed)
-      while (normalized > 10000000000) {
-        normalized = Math.floor(normalized / 1000)
-      }
-      return normalized
-    }
-
-    return this.parseDateTimeTextToSeconds(text)
-  }
-
-  private getRowTimestampSeconds(row: Record<string, any>, keys: string[], fallback = 0): number {
-    const raw = this.getRowField(row, keys)
-    if (raw === undefined || raw === null || raw === '') return fallback
-    const parsed = this.normalizeTimestampLikeToSeconds(raw)
-    return parsed > 0 ? parsed : fallback
   }
 
   private hasAnyContactExtendedFieldKey(row: Record<string, any>): boolean {
@@ -3146,7 +2680,7 @@ class ChatService {
   }
 
   private toExtraBufferBytes(row: Record<string, any>): Buffer | null {
-    const raw = this.getRowField(row, ['extra_buffer', 'extraBuffer'])
+    const raw = getRowField(row, ['extra_buffer', 'extraBuffer'])
     if (raw === undefined || raw === null) return null
     if (Buffer.isBuffer(raw)) return raw.length > 0 ? raw : null
     if (raw instanceof Uint8Array) return raw.length > 0 ? Buffer.from(raw) : null
@@ -3258,7 +2792,7 @@ class ChatService {
   }
 
   private parseContactLabels(row: Record<string, any>, labelNameMap?: Map<number, string>): string[] {
-    const raw = this.getRowField(row, [
+    const raw = getRowField(row, [
       'label_list', 'labelList', 'labels', 'label_names', 'labelNames', 'tags', 'tag_list', 'tagList'
     ])
     const normalizedFromValue = (value: unknown): string[] => {
@@ -3304,7 +2838,7 @@ class ChatService {
       return text
     }
 
-    const value = this.getRowField(row, [
+    const value = getRowField(row, [
       'signature', 'sign', 'personal_signature', 'personalSignature', 'profile', 'introduction',
       'detail_description', 'detailDescription', 'description', 'desc', 'contact_description', 'contactDescription'
     ])
@@ -3523,11 +3057,11 @@ class ChatService {
       return ''
     }
 
-    const directCountry = this.normalizeContactRegionPart(this.getRowField(row, ['country', 'Country'])) || pickByTokens(['country'])
-    const directProvince = this.normalizeContactRegionPart(this.getRowField(row, ['province', 'Province'])) || pickByTokens(['province'])
-    const directCity = this.normalizeContactRegionPart(this.getRowField(row, ['city', 'City'])) || pickByTokens(['city'])
+    const directCountry = this.normalizeContactRegionPart(getRowField(row, ['country', 'Country'])) || pickByTokens(['country'])
+    const directProvince = this.normalizeContactRegionPart(getRowField(row, ['province', 'Province'])) || pickByTokens(['province'])
+    const directCity = this.normalizeContactRegionPart(getRowField(row, ['city', 'City'])) || pickByTokens(['city'])
     const directRegion =
-      this.normalizeContactRegionPart(this.getRowField(row, ['region', 'Region', 'location', 'area'])) ||
+      this.normalizeContactRegionPart(getRowField(row, ['region', 'Region', 'location', 'area'])) ||
       pickByTokens(['region', 'location', 'area', 'addr', 'address'])
 
     if (directRegion) {
@@ -3565,180 +3099,6 @@ class ChatService {
     return parts.join(' ').trim()
   }
 
-  private normalizeUnsignedIntegerToken(raw: any): string | undefined {
-    if (raw === undefined || raw === null || raw === '') return undefined
-
-    if (typeof raw === 'bigint') {
-      return raw >= 0n ? raw.toString() : '0'
-    }
-
-    if (typeof raw === 'number') {
-      if (!Number.isFinite(raw)) return undefined
-      return String(Math.max(0, Math.floor(raw)))
-    }
-
-    if (Buffer.isBuffer(raw)) {
-      return this.normalizeUnsignedIntegerToken(raw.toString('utf-8').trim())
-    }
-    if (raw instanceof Uint8Array) {
-      return this.normalizeUnsignedIntegerToken(Buffer.from(raw).toString('utf-8').trim())
-    }
-    if (Array.isArray(raw)) {
-      return this.normalizeUnsignedIntegerToken(Buffer.from(raw).toString('utf-8').trim())
-    }
-
-    if (typeof raw === 'object') {
-      if ('value' in raw) return this.normalizeUnsignedIntegerToken(raw.value)
-      if ('intValue' in raw) return this.normalizeUnsignedIntegerToken(raw.intValue)
-      if ('low' in raw && 'high' in raw) {
-        try {
-          const low = BigInt(raw.low >>> 0)
-          const high = BigInt(raw.high >>> 0)
-          const value = (high << 32n) + low
-          return value >= 0n ? value.toString() : '0'
-        } catch {
-          return undefined
-        }
-      }
-      const text = raw.toString ? String(raw).trim() : ''
-      if (text && text !== '[object Object]') {
-        return this.normalizeUnsignedIntegerToken(text)
-      }
-      return undefined
-    }
-
-    const text = String(raw).trim()
-    if (!text) return undefined
-    if (/^\d+$/.test(text)) {
-      return text.replace(/^0+(?=\d)/, '') || '0'
-    }
-    if (/^[+-]?\d+$/.test(text)) {
-      try {
-        const value = BigInt(text)
-        return value >= 0n ? value.toString() : '0'
-      } catch {
-        return undefined
-      }
-    }
-
-    const parsed = Number(text)
-    if (Number.isFinite(parsed)) {
-      return String(Math.max(0, Math.floor(parsed)))
-    }
-    return undefined
-  }
-
-  private coerceRowNumber(raw: any): number {
-    if (raw === undefined || raw === null) return NaN
-    if (typeof raw === 'number') return raw
-    if (typeof raw === 'bigint') return Number(raw)
-    if (Buffer.isBuffer(raw)) {
-      return this.coerceRowNumber(raw.toString('utf-8'))
-    }
-    if (raw instanceof Uint8Array) {
-      return this.coerceRowNumber(Buffer.from(raw).toString('utf-8'))
-    }
-    if (Array.isArray(raw)) {
-      return this.coerceRowNumber(Buffer.from(raw).toString('utf-8'))
-    }
-    if (typeof raw === 'object') {
-      if ('value' in raw) return this.coerceRowNumber(raw.value)
-      if ('intValue' in raw) return this.coerceRowNumber(raw.intValue)
-      if ('low' in raw && 'high' in raw) {
-        try {
-          const low = BigInt(raw.low >>> 0)
-          const high = BigInt(raw.high >>> 0)
-          return Number((high << 32n) + low)
-        } catch {
-          return NaN
-        }
-      }
-      const text = raw.toString ? String(raw) : ''
-      if (text && text !== '[object Object]') {
-        return this.coerceRowNumber(text)
-      }
-      return NaN
-    }
-    const text = String(raw).trim()
-    if (!text) return NaN
-    if (/^[+-]?\d+$/.test(text)) {
-      const parsed = Number(text)
-      return Number.isFinite(parsed) ? parsed : NaN
-    }
-    if (/^[+-]?\d+\.\d+$/.test(text)) {
-      const parsed = Number(text)
-      return Number.isFinite(parsed) ? parsed : NaN
-    }
-    return NaN
-  }
-
-  private buildIdentityKeys(raw: string): string[] {
-    const value = String(raw || '').trim()
-    if (!value) return []
-    const lowerRaw = value.toLowerCase()
-    const cleaned = this.cleanAccountDirName(value).toLowerCase()
-    if (cleaned && cleaned !== lowerRaw) {
-      return [cleaned, lowerRaw]
-    }
-    return [lowerRaw]
-  }
-
-  private resolveMessageIsSend(rawIsSend: number | null, senderUsername?: string | null): {
-    isSend: number | null
-    selfMatched: boolean
-    correctedBySelfIdentity: boolean
-  } {
-    const normalizedRawIsSend = Number.isFinite(rawIsSend as number) ? rawIsSend : null
-    const senderKeys = this.buildIdentityKeys(String(senderUsername || ''))
-    if (senderKeys.length === 0) {
-      return {
-        isSend: normalizedRawIsSend,
-        selfMatched: false,
-        correctedBySelfIdentity: false
-      }
-    }
-
-    const myWxid = String(this.configService.getMyWxidCleaned() || '').trim()
-    const selfKeys = this.buildIdentityKeys(myWxid)
-    if (selfKeys.length === 0) {
-      return {
-        isSend: normalizedRawIsSend,
-        selfMatched: false,
-        correctedBySelfIdentity: false
-      }
-    }
-
-    const selfMatched = senderKeys.some(senderKey =>
-      selfKeys.some(selfKey =>
-        senderKey === selfKey ||
-        senderKey.startsWith(selfKey + '_') ||
-        selfKey.startsWith(senderKey + '_')
-      )
-    )
-
-    if (selfMatched && normalizedRawIsSend !== 1) {
-      return {
-        isSend: 1,
-        selfMatched: true,
-        correctedBySelfIdentity: true
-      }
-    }
-
-    if (normalizedRawIsSend === null) {
-      return {
-        isSend: selfMatched ? 1 : 0,
-        selfMatched,
-        correctedBySelfIdentity: false
-      }
-    }
-
-    return {
-      isSend: normalizedRawIsSend,
-      selfMatched,
-      correctedBySelfIdentity: false
-    }
-  }
-
   private extractGroupMemberUsername(member: any): string {
     if (!member) return ''
     if (typeof member === 'string') return member.trim()
@@ -3767,10 +3127,10 @@ class ChatService {
       if (!username || username.includes('@chatroom') || username.startsWith('gh_')) continue
       if (FRIEND_EXCLUDE_USERNAMES.has(username)) continue
 
-      const localType = this.getRowInt(row, ['local_type', 'localType', 'WCDB_CT_local_type'], 0)
+      const localType = getRowInt(row, ['local_type', 'localType', 'WCDB_CT_local_type'], 0)
       if (localType !== 1) continue
 
-      for (const key of this.buildIdentityKeys(username)) {
+      for (const key of buildIdentityKeys(username)) {
         identities.add(key)
       }
     }
@@ -4216,21 +3576,6 @@ class ChatService {
     return String(value || '').replace(/'/g, "''")
   }
 
-  private extractType49XmlTypeForStats(content: string): string {
-    if (!content) return ''
-
-    const appmsgMatch = /<appmsg[\s\S]*?>([\s\S]*?)<\/appmsg>/i.exec(content)
-    if (appmsgMatch) {
-      const appmsgInner = appmsgMatch[1]
-        .replace(/<refermsg[\s\S]*?<\/refermsg>/gi, '')
-        .replace(/<patMsg[\s\S]*?<\/patMsg>/gi, '')
-      const typeMatch = /<type>([\s\S]*?)<\/type>/i.exec(appmsgInner)
-      if (typeMatch) return String(typeMatch[1] || '').trim()
-    }
-
-    return this.extractXmlValue(content, 'type')
-  }
-
   private async collectSpecialMessageCountsByCursorScan(
     sessionId: string,
     beginTimestamp: number = 0,
@@ -4258,7 +3603,7 @@ class ChatService {
         if (!batch.success) break
         const rows = Array.isArray(batch.rows) ? batch.rows as Record<string, any>[] : []
         for (const row of rows) {
-          const localType = this.getRowInt(row, ['local_type'], 1)
+          const localType = getRowInt(row, ['local_type'], 1)
           if (localType === 50) {
             counters.callMessages += 1
             continue
@@ -4275,8 +3620,8 @@ class ChatService {
 
           const rawMessageContent = row.message_content
           const rawCompressContent = row.compress_content
-          const content = this.decodeMessageContent(rawMessageContent, rawCompressContent)
-          const xmlType = this.extractType49XmlTypeForStats(content)
+          const content = decodeMessageContent(rawMessageContent, rawCompressContent)
+          const xmlType = extractType49XmlTypeForStats(content)
           if (xmlType === '2000') counters.transferMessages += 1
           if (xmlType === '2001') counters.redPacketMessages += 1
         }
@@ -4329,7 +3674,7 @@ class ChatService {
         for (const row of rows) {
           stats.totalMessages += 1
 
-          const localType = this.getRowInt(row, ['local_type'], 1)
+          const localType = getRowInt(row, ['local_type'], 1)
           if (localType === 34) stats.voiceMessages += 1
           if (localType === 3) stats.imageMessages += 1
           if (localType === 43) stats.videoMessages += 1
@@ -4340,13 +3685,13 @@ class ChatService {
           if (localType === 49) {
             const rawMessageContent = row.message_content
             const rawCompressContent = row.compress_content
-            const content = this.decodeMessageContent(rawMessageContent, rawCompressContent)
-            const xmlType = this.extractType49XmlTypeForStats(content)
+            const content = decodeMessageContent(rawMessageContent, rawCompressContent)
+            const xmlType = extractType49XmlTypeForStats(content)
             if (xmlType === '2000') stats.transferMessages += 1
             if (xmlType === '2001') stats.redPacketMessages += 1
           }
 
-          const createTime = this.getRowInt(
+          const createTime = getRowInt(
             row,
             ['create_time'],
             0
@@ -4362,14 +3707,14 @@ class ChatService {
 
           if (sessionId.endsWith('@chatroom')) {
             const sender = String(row.sender_username || '').trim()
-            const senderKeys = this.buildIdentityKeys(sender)
+            const senderKeys = buildIdentityKeys(sender)
             if (senderKeys.length > 0) {
               senderIdentities.add(senderKeys[0])
               if (senderKeys.some((key) => selfIdentitySet.has(key))) {
                 stats.groupMyMessages = (stats.groupMyMessages || 0) + 1
               }
             } else {
-              const isSend = this.coerceRowNumber(row.computed_is_send ?? row.is_send)
+              const isSend = coerceRowNumber(row.computed_is_send ?? row.is_send)
               if (Number.isFinite(isSend) && isSend === 1) {
                 stats.groupMyMessages = (stats.groupMyMessages || 0) + 1
               }
@@ -4537,7 +3882,7 @@ class ChatService {
 
     const privateIndex = new Map<string, Set<string>>()
     for (const sessionId of privateSessionIds) {
-      for (const key of this.buildIdentityKeys(sessionId)) {
+      for (const key of buildIdentityKeys(sessionId)) {
         const set = privateIndex.get(key) || new Set<string>()
         set.add(sessionId)
         privateIndex.set(key, set)
@@ -4558,7 +3903,7 @@ class ChatService {
 
       for (const member of membersResult.members) {
         const username = this.extractGroupMemberUsername(member)
-        const identityKeys = this.buildIdentityKeys(username)
+        const identityKeys = buildIdentityKeys(username)
         if (identityKeys.length === 0) continue
         const canonical = identityKeys[0]
 
@@ -4825,994 +4170,15 @@ class ChatService {
   /**
    * HTTP API 复用消息解析逻辑，确保和应用内展示一致。
    */
-  mapRowsToMessagesForApi(rows: Record<string, any>[], sessionId: string): Message[] {
-    return this.mapRowsToMessages(rows, sessionId)
-  }
-
+  
   mapRowsToMessagesLiteForApi(rows: Record<string, any>[]): Message[] {
     const myWxid = String(this.configService.getMyWxidCleaned() || '').trim()
-    const messages: Message[] = []
-    for (const row of rows) {
-      const sourceInfo = this.getMessageSourceInfo(row)
-      const localType = this.getRowInt(row, ['local_type'], 1)
-      const createTime = this.getRowTimestampSeconds(row, ['create_time', 'createTime', 'msg_time', 'msgTime', 'time'], 0)
-      const sortSeq = this.getRowInt(row, ['sort_seq'], createTime > 0 ? createTime * 1000 : 0)
-      const localId = this.getRowInt(row, ['local_id'], 0)
-      const serverIdRaw = this.normalizeUnsignedIntegerToken(row.server_id)
-      const serverId = this.getRowInt(row, ['server_id'], 0)
-      const content = this.decodeMessageContent(row.message_content, row.compress_content)
-
-      const isSendRaw = row.computed_is_send ?? row.is_send
-      const parsedRawIsSend = isSendRaw === null || isSendRaw === undefined
-        ? null
-        : parseInt(String(isSendRaw), 10)
-      const normalizedIsSend = typeof parsedRawIsSend === 'number' && Number.isFinite(parsedRawIsSend)
-        ? parsedRawIsSend
-        : null
-      const senderFromRow = String(row.sender_username || '').trim() || this.extractSenderUsernameFromContent(content) || null
-      const { isSend } = this.resolveMessageIsSend(normalizedIsSend, senderFromRow)
-      const senderUsername = senderFromRow || (isSend === 1 && myWxid ? myWxid : null)
-
-      messages.push({
-        messageKey: this.buildMessageKey({
-          localId,
-          serverId,
-          createTime,
-          sortSeq,
-          senderUsername,
-          localType,
-          ...sourceInfo
-        }),
-        localId,
-        serverId,
-        serverIdRaw,
-        localType,
-        createTime,
-        sortSeq,
-        isSend,
-        senderUsername,
-        parsedContent: '',
-        rawContent: content,
-        content,
-        _db_path: sourceInfo.dbPath
-      })
-    }
-    return messages
+    return mapRowsToMessagesLite(rows, myWxid)
   }
 
-  private mapRowsToMessages(rows: Record<string, any>[], sessionId: string): Message[] {
-    const myWxid = this.configService.getMyWxidCleaned()
-
-    const messages: Message[] = []
-    for (const row of rows) {
-      const sourceInfo = this.getMessageSourceInfo(row)
-      const rawMessageContent = row.message_content
-      const rawCompressContent = row.compress_content
-
-      const content = this.decodeMessageContent(rawMessageContent, rawCompressContent);
-      const localType = this.getRowInt(row, ['local_type'], 1)
-      const isSendRaw = row.computed_is_send ?? row.is_send
-      const parsedRawIsSend = isSendRaw === null ? null : parseInt(isSendRaw, 10)
-      const senderUsername = row.sender_username
-        || this.extractSenderUsernameFromContent(content)
-        || null
-      const { isSend } = this.resolveMessageIsSend(parsedRawIsSend, senderUsername)
-      const createTime = this.getRowTimestampSeconds(row, ['create_time', 'createTime', 'msg_time', 'msgTime', 'time'], 0)
-
-      if (senderUsername && !myWxid) {
-        // [DEBUG] Issue #34: 未配置 myWxid，无法判断是否发送
-        if (messages.length < 5) {
-          console.warn(`[ChatService] Warning: myWxid not set. Cannot determine if message is sent by me. sender=${senderUsername}`)
-        }
-      }
-
-      let emojiCdnUrl: string | undefined
-      let emojiMd5: string | undefined
-      let quotedContent: string | undefined
-      let quotedSender: string | undefined
-      let imageMd5: string | undefined
-      let imageOriginSourceMd5: string | undefined
-      let imageDatName: string | undefined
-      let videoMd5: string | undefined
-      let aesKey: string | undefined
-      let encrypVer: number | undefined
-      let cdnThumbUrl: string | undefined
-      let voiceDurationSeconds: number | undefined
-      // Type 49 细分字段
-      let linkTitle: string | undefined
-      let linkUrl: string | undefined
-      let linkThumb: string | undefined
-      let fileName: string | undefined
-      let fileSize: number | undefined
-      let fileExt: string | undefined
-      let fileMd5: string | undefined
-      let xmlType: string | undefined
-      let appMsgKind: string | undefined
-      let appMsgDesc: string | undefined
-      let appMsgAppName: string | undefined
-      let appMsgSourceName: string | undefined
-      let appMsgSourceUsername: string | undefined
-      let appMsgThumbUrl: string | undefined
-      let appMsgMusicUrl: string | undefined
-      let appMsgDataUrl: string | undefined
-      let appMsgLocationLabel: string | undefined
-      let finderNickname: string | undefined
-      let finderUsername: string | undefined
-      let finderCoverUrl: string | undefined
-      let finderAvatar: string | undefined
-      let finderDuration: number | undefined
-      let locationLat: number | undefined
-      let locationLng: number | undefined
-      let locationPoiname: string | undefined
-      let locationLabel: string | undefined
-      let musicAlbumUrl: string | undefined
-      let musicUrl: string | undefined
-      let giftImageUrl: string | undefined
-      let giftWish: string | undefined
-      let giftPrice: string | undefined
-      // 名片消息
-      let cardUsername: string | undefined
-      let cardNickname: string | undefined
-      let cardAvatarUrl: string | undefined
-      // 转账消息
-      let transferPayerUsername: string | undefined
-      let transferReceiverUsername: string | undefined
-      // 聊天记录
-      let chatRecordTitle: string | undefined
-      let chatRecordList: Array<{
-        datatype: number
-        sourcename: string
-        sourcetime: string
-        sourceheadurl?: string
-        datadesc?: string
-        datatitle?: string
-        fileext?: string
-        datasize?: number
-        messageuuid?: string
-        dataurl?: string
-        datathumburl?: string
-        datacdnurl?: string
-        cdndatakey?: string
-        cdnthumbkey?: string
-        aeskey?: string
-        md5?: string
-        fullmd5?: string
-        thumbfullmd5?: string
-        srcMsgLocalid?: number
-        imgheight?: number
-        imgwidth?: number
-        duration?: number
-        chatRecordTitle?: string
-        chatRecordDesc?: string
-        chatRecordList?: any[]
-      }> | undefined
-
-      if (localType === 47 && content) {
-        const emojiInfo = this.parseEmojiInfo(content)
-        emojiCdnUrl = emojiInfo.cdnUrl
-        emojiMd5 = emojiInfo.md5
-        cdnThumbUrl = emojiInfo.thumbUrl // 复用 cdnThumbUrl 字段或使用 emojiThumbUrl
-        // 注意：Message 接口定义的 emojiThumbUrl，这里我们统一一下
-        // 如果 Message 接口有 emojiThumbUrl，则使用它
-      } else if (localType === 3 && content) {
-        const imageInfo = this.parseImageInfo(content)
-        imageMd5 = imageInfo.md5
-        imageOriginSourceMd5 = imageInfo.originSourceMd5
-        aesKey = imageInfo.aesKey
-        encrypVer = imageInfo.encrypVer
-        cdnThumbUrl = imageInfo.cdnThumbUrl
-        imageDatName = this.parseImageDatNameFromRow(row)
-        // 解析图片消息中的引用信息
-        const quoteInfo = this.parseMediaQuoteMessage(content, sessionId)
-        if (quoteInfo.content) quotedContent = quoteInfo.content
-        if (quoteInfo.sender) quotedSender = quoteInfo.sender
-      } else if (localType === 43) {
-        // 视频消息：优先从 packed_info_data 提取真实文件名（32位十六进制），再回退 XML
-        videoMd5 = this.parseVideoFileNameFromRow(row, content)
-        // 解析视频消息中的引用信息
-        const quoteInfo = this.parseMediaQuoteMessage(content, sessionId)
-        if (quoteInfo.content) quotedContent = quoteInfo.content
-        if (quoteInfo.sender) quotedSender = quoteInfo.sender
-      } else if (localType === 34 && content) {
-        voiceDurationSeconds = this.parseVoiceDurationSeconds(content)
-        // 解析语音消息中的引用信息
-        const quoteInfo = this.parseMediaQuoteMessage(content, sessionId)
-        if (quoteInfo.content) quotedContent = quoteInfo.content
-        if (quoteInfo.sender) quotedSender = quoteInfo.sender
-      } else if (localType === 42 && content) {
-        // 名片消息
-        const cardInfo = this.parseCardInfo(content)
-        cardUsername = cardInfo.username
-        cardNickname = cardInfo.nickname
-        cardAvatarUrl = cardInfo.avatarUrl
-      } else if (localType === 48 && content) {
-        // 位置消息
-        const latStr = this.extractXmlAttribute(content, 'location', 'x') || this.extractXmlAttribute(content, 'location', 'latitude')
-        const lngStr = this.extractXmlAttribute(content, 'location', 'y') || this.extractXmlAttribute(content, 'location', 'longitude')
-        if (latStr) { const v = parseFloat(latStr); if (Number.isFinite(v)) locationLat = v }
-        if (lngStr) { const v = parseFloat(lngStr); if (Number.isFinite(v)) locationLng = v }
-        locationLabel = this.extractXmlAttribute(content, 'location', 'label') || this.extractXmlValue(content, 'label') || undefined
-        locationPoiname = this.extractXmlAttribute(content, 'location', 'poiname') || this.extractXmlValue(content, 'poiname') || undefined
-      } else if ((localType === 49 || localType === 8589934592049) && content) {
-        // Type 49 消息（链接、文件、小程序、转账等），8589934592049 也是转账类型
-        const type49Info = this.parseType49Message(content)
-        xmlType = type49Info.xmlType
-        linkTitle = type49Info.linkTitle
-        linkUrl = type49Info.linkUrl
-        linkThumb = type49Info.linkThumb
-        fileName = type49Info.fileName
-        fileSize = type49Info.fileSize
-        fileExt = type49Info.fileExt
-        fileMd5 = type49Info.fileMd5
-        chatRecordTitle = type49Info.chatRecordTitle
-        chatRecordList = type49Info.chatRecordList
-        transferPayerUsername = type49Info.transferPayerUsername
-        transferReceiverUsername = type49Info.transferReceiverUsername
-        // 引用消息（appmsg type=57）的 quotedContent/quotedSender
-        if (type49Info.quotedContent !== undefined) quotedContent = type49Info.quotedContent
-        if (type49Info.quotedSender !== undefined) quotedSender = type49Info.quotedSender
-      } else if (localType === 244813135921 || (content && content.includes('<type>57</type>'))) {
-        const quoteInfo = this.parseQuoteMessage(content)
-        quotedContent = quoteInfo.content
-        quotedSender = quoteInfo.sender
-      }
-
-      const looksLikeAppMsg = Boolean(content && (content.includes('<appmsg') || content.includes('&lt;appmsg')))
-      if (looksLikeAppMsg) {
-        const type49Info = this.parseType49Message(content)
-        xmlType = xmlType || type49Info.xmlType
-        linkTitle = linkTitle || type49Info.linkTitle
-        linkUrl = linkUrl || type49Info.linkUrl
-        linkThumb = linkThumb || type49Info.linkThumb
-        fileName = fileName || type49Info.fileName
-        fileSize = fileSize ?? type49Info.fileSize
-        fileExt = fileExt || type49Info.fileExt
-        fileMd5 = fileMd5 || type49Info.fileMd5
-        appMsgKind = appMsgKind || type49Info.appMsgKind
-        appMsgDesc = appMsgDesc || type49Info.appMsgDesc
-        appMsgAppName = appMsgAppName || type49Info.appMsgAppName
-        appMsgSourceName = appMsgSourceName || type49Info.appMsgSourceName
-        appMsgSourceUsername = appMsgSourceUsername || type49Info.appMsgSourceUsername
-        appMsgThumbUrl = appMsgThumbUrl || type49Info.appMsgThumbUrl
-        appMsgMusicUrl = appMsgMusicUrl || type49Info.appMsgMusicUrl
-        appMsgDataUrl = appMsgDataUrl || type49Info.appMsgDataUrl
-        appMsgLocationLabel = appMsgLocationLabel || type49Info.appMsgLocationLabel
-        finderNickname = finderNickname || type49Info.finderNickname
-        finderUsername = finderUsername || type49Info.finderUsername
-        finderCoverUrl = finderCoverUrl || type49Info.finderCoverUrl
-        finderAvatar = finderAvatar || type49Info.finderAvatar
-        finderDuration = finderDuration ?? type49Info.finderDuration
-        locationLat = locationLat ?? type49Info.locationLat
-        locationLng = locationLng ?? type49Info.locationLng
-        locationPoiname = locationPoiname || type49Info.locationPoiname
-        locationLabel = locationLabel || type49Info.locationLabel
-        musicAlbumUrl = musicAlbumUrl || type49Info.musicAlbumUrl
-        musicUrl = musicUrl || type49Info.musicUrl
-        giftImageUrl = giftImageUrl || type49Info.giftImageUrl
-        giftWish = giftWish || type49Info.giftWish
-        giftPrice = giftPrice || type49Info.giftPrice
-        chatRecordTitle = chatRecordTitle || type49Info.chatRecordTitle
-        chatRecordList = chatRecordList || type49Info.chatRecordList
-        transferPayerUsername = transferPayerUsername || type49Info.transferPayerUsername
-        transferReceiverUsername = transferReceiverUsername || type49Info.transferReceiverUsername
-        if (!quotedContent && type49Info.quotedContent !== undefined) quotedContent = type49Info.quotedContent
-        if (!quotedSender && type49Info.quotedSender !== undefined) quotedSender = type49Info.quotedSender
-      }
-
-      const localId = this.getRowInt(row, ['local_id'], 0)
-      const serverIdRaw = this.normalizeUnsignedIntegerToken(row.server_id)
-      const serverId = this.getRowInt(row, ['server_id'], 0)
-      const sortSeq = this.getRowInt(row, ['sort_seq'], createTime)
-
-      messages.push({
-        messageKey: this.buildMessageKey({
-          localId,
-          serverId,
-          createTime,
-          sortSeq,
-          senderUsername,
-          localType,
-          ...sourceInfo
-        }),
-        localId,
-        serverId,
-        serverIdRaw,
-        localType,
-        createTime,
-        sortSeq,
-        isSend,
-        senderUsername,
-        parsedContent: this.parseMessageContent(content, localType),
-        rawContent: content,
-        emojiCdnUrl,
-        emojiMd5,
-        quotedContent,
-        quotedSender,
-        imageMd5,
-        imageOriginSourceMd5,
-        imageDatName,
-        videoMd5,
-        voiceDurationSeconds,
-        aesKey,
-        encrypVer,
-        cdnThumbUrl,
-        linkTitle,
-        linkUrl,
-        linkThumb,
-        fileName,
-        fileSize,
-        fileExt,
-        fileMd5,
-        xmlType,
-        appMsgKind,
-        appMsgDesc,
-        appMsgAppName,
-        appMsgSourceName,
-        appMsgSourceUsername,
-        appMsgThumbUrl,
-        appMsgMusicUrl,
-        appMsgDataUrl,
-        appMsgLocationLabel,
-        finderNickname,
-        finderUsername,
-        finderCoverUrl,
-        finderAvatar,
-        finderDuration,
-        locationLat,
-        locationLng,
-        locationPoiname,
-        locationLabel,
-        musicAlbumUrl,
-        musicUrl,
-        giftImageUrl,
-        giftWish,
-        giftPrice,
-        cardUsername,
-        cardNickname,
-        cardAvatarUrl,
-        transferPayerUsername,
-        transferReceiverUsername,
-        chatRecordTitle,
-        chatRecordList,
-        _db_path: sourceInfo.dbPath
-      })
-      const last = messages[messages.length - 1]
-      if ((last.localType === 3 || last.localType === 34) && (last.localId === 0 || last.createTime === 0)) {
-        console.warn('[ChatService] message key missing', {
-          localType: last.localType,
-          localId: last.localId,
-          createTime: last.createTime,
-          rowKeys: Object.keys(row)
-        })
-      }
-    }
-    return messages
-  }
-
-  /**
-   * 解析消息内容
-   */
-  private parseMessageContent(content: string, localType: number): string {
-    if (!content) {
-      return this.getMessageTypeLabel(localType)
-    }
-
-    // 尝试解码 Buffer
-    if (Buffer.isBuffer(content)) {
-      content = content.toString('utf-8')
-    }
-
-    content = this.decodeHtmlEntities(content)
-    content = this.cleanUtf16(content)
-
-    // 检查 XML type，用于识别引用消息等
-    const xmlType = this.extractXmlValue(content, 'type')
-    const looksLikeAppMsg = content.includes('<appmsg') || content.includes('&lt;appmsg')
-
-    switch (localType) {
-      case 1:
-        return this.stripSenderPrefix(content)
-      case 3:
-        return '[图片]'
-      case 34:
-        return '[语音消息]'
-      case 42:
-        return '[名片]'
-      case 43:
-        return '[视频]'
-      case 47:
-        return '[动画表情]'
-      case 48: {
-        const label =
-          this.extractXmlAttribute(content, 'location', 'label') ||
-          this.extractXmlAttribute(content, 'location', 'poiname') ||
-          this.extractXmlValue(content, 'label') ||
-          this.extractXmlValue(content, 'poiname')
-        return label ? `[位置] ${label}` : '[位置]'
-      }
-      case 49:
-        return this.parseType49(content)
-      case 50:
-        return this.parseVoipMessage(content)
-      case 10000:
-        return this.cleanSystemMessage(content)
-      case 244813135921:
-        // 引用消息，提取 title
-        const title = this.extractXmlValue(content, 'title')
-        return title || '[引用消息]'
-      case 266287972401:
-        return this.cleanPatMessage(content)
-      case 81604378673:
-        return '[聊天记录]'
-      case 8594229559345:
-        return '[红包]'
-      case 8589934592049:
-        return '[转账]'
-      default:
-        // 检查是否是 type=87 的群公告消息
-        if (xmlType === '87') {
-          const textAnnouncement = this.extractXmlValue(content, 'textannouncement')
-          if (textAnnouncement) {
-            return `[群公告] ${textAnnouncement}`
-          }
-          return '[群公告]'
-        }
-
-        // 检查是否是 type=57 的引用消息
-        if (xmlType === '57') {
-          const title = this.extractXmlValue(content, 'title')
-          return title || '[引用消息]'
-        }
-
-        if (looksLikeAppMsg) {
-          return this.parseType49(content)
-        }
-
-        // 尝试从 XML 提取通用 title
-        const genericTitle = this.extractXmlValue(content, 'title')
-        if (genericTitle && genericTitle.length > 0 && genericTitle.length < 100) {
-          return genericTitle
-        }
-
-        if (content.length > 200) {
-          return this.getMessageTypeLabel(localType)
-        }
-        return this.stripSenderPrefix(content) || this.getMessageTypeLabel(localType)
-    }
-  }
-
-  private parseType49(content: string): string {
-    const title = this.extractXmlValue(content, 'title')
-    // 从 appmsg 直接子节点提取 type，避免匹配到 refermsg 内部的 <type>
-    let type = ''
-    const appmsgMatch = /<appmsg[\s\S]*?>([\s\S]*?)<\/appmsg>/i.exec(content)
-    if (appmsgMatch) {
-      const inner = appmsgMatch[1]
-        .replace(/<refermsg[\s\S]*?<\/refermsg>/gi, '')
-        .replace(/<patMsg[\s\S]*?<\/patMsg>/gi, '')
-      const typeMatch = /<type>([\s\S]*?)<\/type>/i.exec(inner)
-      if (typeMatch) type = typeMatch[1].trim()
-    }
-    if (!type) type = this.extractXmlValue(content, 'type')
-    const normalized = content.toLowerCase()
-    const locationLabel =
-      this.extractXmlAttribute(content, 'location', 'label') ||
-      this.extractXmlAttribute(content, 'location', 'poiname') ||
-      this.extractXmlValue(content, 'label') ||
-      this.extractXmlValue(content, 'poiname')
-    const isFinder =
-      type === '51' ||
-      normalized.includes('<finder') ||
-      normalized.includes('finderusername') ||
-      normalized.includes('finderobjectid')
-    const isRedPacket = type === '2001' || normalized.includes('hongbao')
-    const isMusic =
-      type === '3' ||
-      normalized.includes('<musicurl>') ||
-      normalized.includes('<playurl>') ||
-      normalized.includes('<dataurl>')
-
-    // 群公告消息（type 87）特殊处理
-    if (type === '87') {
-      const textAnnouncement = this.extractXmlValue(content, 'textannouncement')
-      if (textAnnouncement) {
-        return `[群公告] ${textAnnouncement}`
-      }
-      return '[群公告]'
-    }
-
-    if (isFinder) {
-      return title ? `[视频号] ${title}` : '[视频号]'
-    }
-    if (isRedPacket) {
-      return title ? `[红包] ${title}` : '[红包]'
-    }
-    if (locationLabel) {
-      return `[位置] ${locationLabel}`
-    }
-    if (isMusic) {
-      return title ? `[音乐] ${title}` : '[音乐]'
-    }
-
-    if (title) {
-      switch (type) {
-        case '5':
-        case '49':
-          return `[链接] ${title}`
-        case '6':
-          return `[文件] ${title}`
-        case '19':
-          return `[聊天记录] ${title}`
-        case '33':
-        case '36':
-          return `[小程序] ${title}`
-        case '57':
-          // 引用消息，title 就是回复的内容
-          return title
-        case '53':
-          return `[接龙] ${title.split(/\r?\n/).map(line => line.trim()).find(Boolean) || title}`
-        case '2000':
-          return `[转账] ${title}`
-        case '2001':
-          return `[红包] ${title}`
-        default:
-          return title
-      }
-    }
-
-    // 如果没有 title，根据 type 返回默认标签
-    switch (type) {
-      case '6':
-        return '[文件]'
-      case '19':
-        return '[聊天记录]'
-      case '33':
-      case '36':
-        return '[小程序]'
-      case '2000':
-        return '[转账]'
-      case '2001':
-        return '[红包]'
-      case '3':
-        return '[音乐]'
-      case '5':
-      case '49':
-        return '[链接]'
-      case '87':
-        return '[群公告]'
-      case '53':
-        return '[接龙]'
-      default:
-        return '[消息]'
-    }
-  }
-
-  /**
-   * 解析表情包信息
-   */
-  private parseEmojiInfo(content: string): { cdnUrl?: string; md5?: string; thumbUrl?: string; encryptUrl?: string; aesKey?: string } {
-    try {
-      // 提取 cdnurl
-      let cdnUrl: string | undefined
-      const cdnUrlMatch = /cdnurl\s*=\s*['"]([^'"]+)['"]/i.exec(content) || /cdnurl\s*=\s*([^'"]+?)(?=\s|\/|>)/i.exec(content)
-      if (cdnUrlMatch) {
-        cdnUrl = cdnUrlMatch[1].replace(/&amp;/g, '&')
-        if (cdnUrl.includes('%')) {
-          try {
-            cdnUrl = decodeURIComponent(cdnUrl)
-          } catch { }
-        }
-      }
-
-      // 提取 thumburl
-      let thumbUrl: string | undefined
-      const thumbUrlMatch = /thumburl\s*=\s*['"]([^'"]+)['"]/i.exec(content) || /thumburl\s*=\s*([^'"]+?)(?=\s|\/|>)/i.exec(content)
-      if (thumbUrlMatch) {
-        thumbUrl = thumbUrlMatch[1].replace(/&amp;/g, '&')
-        if (thumbUrl.includes('%')) {
-          try {
-            thumbUrl = decodeURIComponent(thumbUrl)
-          } catch { }
-        }
-      }
-
-      // 提取 md5
-      const md5Match = /md5\s*=\s*['"]([a-fA-F0-9]+)['"]/i.exec(content) || /md5\s*=\s*([a-fA-F0-9]+)/i.exec(content)
-      const md5 = md5Match ? md5Match[1] : undefined
-
-      // 提取 encrypturl
-      let encryptUrl: string | undefined
-      const encryptUrlMatch = /encrypturl\s*=\s*['"]([^'"]+)['"]/i.exec(content) || /encrypturl\s*=\s*([^'"]+?)(?=\s|\/|>)/i.exec(content)
-      if (encryptUrlMatch) {
-        encryptUrl = encryptUrlMatch[1].replace(/&amp;/g, '&')
-        if (encryptUrl.includes('%')) {
-          try {
-            encryptUrl = decodeURIComponent(encryptUrl)
-          } catch { }
-        }
-      }
-
-      // 提取 aeskey
-      const aesKeyMatch = /aeskey\s*=\s*['"]([a-zA-Z0-9]+)['"]/i.exec(content) || /aeskey\s*=\s*([a-zA-Z0-9]+)/i.exec(content)
-      const aesKey = aesKeyMatch ? aesKeyMatch[1] : undefined
-
-      return { cdnUrl, md5, thumbUrl, encryptUrl, aesKey }
-    } catch (e) {
-      console.error('[ChatService] 表情包解析失败:', e, { xml: content })
-      return {}
-    }
-  }
-
-  /**
-   * 解析图片信息
-   */
-  private parseImageInfo(content: string): { md5?: string; originSourceMd5?: string; aesKey?: string; encrypVer?: number; cdnThumbUrl?: string } {
-    try {
-      const md5 =
-        this.extractXmlValue(content, 'md5') ||
-        this.extractXmlAttribute(content, 'img', 'md5') ||
-        undefined
-      const originSourceMd5Raw =
-        this.extractXmlAttribute(content, 'img', 'originsourcemd5') ||
-        undefined
-      const originSourceMd5 = originSourceMd5Raw
-        ? originSourceMd5Raw.trim().toLowerCase()
-        : undefined
-      const aesKey = this.extractXmlAttribute(content, 'img', 'aeskey') || undefined
-      const encrypVerStr = this.extractXmlAttribute(content, 'img', 'encrypver') || undefined
-      const cdnThumbUrl = this.extractXmlAttribute(content, 'img', 'cdnthumburl') || undefined
-
-      return {
-        md5,
-        originSourceMd5: originSourceMd5 && originSourceMd5 !== md5?.toLowerCase()
-          ? originSourceMd5
-          : undefined,
-        aesKey,
-        encrypVer: encrypVerStr ? parseInt(encrypVerStr, 10) : undefined,
-        cdnThumbUrl
-      }
-    } catch {
-      return {}
-    }
-  }
-
-  /**
-   * 解析视频MD5
-   * 注意：提取 md5 字段用于查询 hardlink.db，获取实际视频文件名
-   */
-  private parseVideoMd5(content: string): string | undefined {
-    if (!content) return undefined
-
-    try {
-      // 优先取 md5 属性（收到的视频）
-      const md5 = this.extractXmlAttribute(content, 'videomsg', 'md5')
-      if (md5) return md5.toLowerCase()
-
-      // 自己发的视频没有 md5，只有 rawmd5
-      const rawMd5 = this.extractXmlAttribute(content, 'videomsg', 'rawmd5')
-      if (rawMd5) return rawMd5.toLowerCase()
-
-      // 兜底：<md5> 标签
-      const tagMd5 = this.extractXmlValue(content, 'md5')
-      if (tagMd5) return tagMd5.toLowerCase()
-
-      return undefined
-    } catch {
-      return undefined
-    }
-  }
-
-  /**
-   * 解析通话消息
-   * 格式: <voipmsg type="VoIPBubbleMsg"><VoIPBubbleMsg><msg><![CDATA[...]]></msg><room_type>0/1</room_type>...</VoIPBubbleMsg></voipmsg>
-   * room_type: 0 = 语音通话, 1 = 视频通话
-   * msg 状态: 通话时长 XX:XX, 对方无应答, 已取消, 已在其它设备接听, 对方已拒绝 等
-   */
-  private parseVoipMessage(content: string): string {
-    try {
-      if (!content) return '[通话]'
-
-      // 提取 msg 内容（中文通话状态）
-      const msgMatch = /<msg><!\[CDATA\[(.*?)\]\]><\/msg>/i.exec(content)
-      const msg = msgMatch?.[1]?.trim() || ''
-
-      // 提取 room_type（0=视频，1=语音）
-      const roomTypeMatch = /<room_type>(\d+)<\/room_type>/i.exec(content)
-      const roomType = roomTypeMatch ? parseInt(roomTypeMatch[1], 10) : -1
-
-      // 构建通话类型标签
-      let callType: string
-      if (roomType === 0) {
-        callType = '视频通话'
-      } else if (roomType === 1) {
-        callType = '语音通话'
-      } else {
-        callType = '通话'
-      }
-
-      // 解析通话状态
-      if (msg.includes('通话时长')) {
-        // 已接听的通话，提取时长
-        const durationMatch = /通话时长\s*(\d{1,2}:\d{2}(?::\d{2})?)/i.exec(msg)
-        const duration = durationMatch?.[1] || ''
-        if (duration) {
-          return `[${callType}] ${duration}`
-        }
-        return `[${callType}] 已接听`
-      } else if (msg.includes('对方无应答')) {
-        return `[${callType}] 对方无应答`
-      } else if (msg.includes('已取消')) {
-        return `[${callType}] 已取消`
-      } else if (msg.includes('已在其它设备接听') || msg.includes('已在其他设备接听')) {
-        return `[${callType}] 已在其他设备接听`
-      } else if (msg.includes('对方已拒绝') || msg.includes('已拒绝')) {
-        return `[${callType}] 对方已拒绝`
-      } else if (msg.includes('忙线未接听') || msg.includes('忙线')) {
-        return `[${callType}] 忙线未接听`
-      } else if (msg.includes('未接听')) {
-        return `[${callType}] 未接听`
-      } else if (msg) {
-        // 其他状态直接使用 msg 内容
-        return `[${callType}] ${msg}`
-      }
-
-      return `[${callType}]`
-    } catch (e) {
-      console.error('[ChatService] Failed to parse VOIP message:', e)
-      return '[通话]'
-    }
-  }
-
-  private parseImageDatNameFromRow(row: Record<string, any>): string | undefined {
-    const packed = this.getRowField(row, [
-      'packed_info_data',
-      'packedInfoData',
-      'packed_info_blob',
-      'packedInfoBlob',
-      'packed_info',
-      'packedInfo',
-      'BytesExtra',
-      'bytes_extra',
-      'WCDB_CT_packed_info',
-      'reserved0',
-      'Reserved0',
-      'WCDB_CT_Reserved0'
-    ])
-    const buffer = this.decodePackedInfo(packed)
-    if (!buffer || buffer.length === 0) return undefined
-    const printable: number[] = []
-    for (const byte of buffer) {
-      if (byte >= 0x20 && byte <= 0x7e) {
-        printable.push(byte)
-      } else {
-        printable.push(0x20)
-      }
-    }
-    const text = Buffer.from(printable).toString('utf-8')
-    const match = /([0-9a-fA-F]{8,})(?:\.t)?\.dat/.exec(text)
-    if (match?.[1]) return match[1].toLowerCase()
-    const hexMatch = /([0-9a-fA-F]{16,})/.exec(text)
-    return hexMatch?.[1]?.toLowerCase()
-  }
-
-  private parseVideoFileNameFromRow(row: Record<string, any>, content?: string): string | undefined {
-    const packed = this.getRowField(row, [
-      'packed_info_data',
-      'packedInfoData',
-      'packed_info_blob',
-      'packedInfoBlob',
-      'packed_info',
-      'packedInfo',
-      'BytesExtra',
-      'bytes_extra',
-      'WCDB_CT_packed_info',
-      'reserved0',
-      'Reserved0',
-      'WCDB_CT_Reserved0'
-    ])
-    const packedToken = this.extractVideoTokenFromPackedRaw(packed)
-    if (packedToken) return packedToken
-
-    const byColumn = this.normalizeVideoFileToken(this.getRowField(row, [
-      'video_md5',
-      'videoMd5',
-      'raw_md5',
-      'rawMd5',
-      'video_file_name',
-      'videoFileName'
-    ]))
-    if (byColumn) return byColumn
-
-    return this.normalizeVideoFileToken(this.parseVideoMd5(content || ''))
-  }
-
-  private normalizeVideoFileToken(value: unknown): string | undefined {
-    let text = String(value || '').trim().toLowerCase()
-    if (!text) return undefined
-    text = text.replace(/^.*[\\/]/, '')
-    text = text.replace(/\.(?:mp4|mov|m4v|avi|mkv|flv|jpg|jpeg|png|gif|dat)$/i, '')
-    text = text.replace(/_thumb$/, '')
-    const directMatch = /^([a-f0-9]{16,64})(?:_raw)?$/i.exec(text)
-    if (directMatch) {
-      const suffix = /_raw$/i.test(text) ? '_raw' : ''
-      return `${directMatch[1].toLowerCase()}${suffix}`
-    }
-    const preferred32 = /([a-f0-9]{32})(?![a-f0-9])/i.exec(text)
-    if (preferred32?.[1]) return preferred32[1].toLowerCase()
-    const generic = /([a-f0-9]{16,64})(?![a-f0-9])/i.exec(text)
-    return generic?.[1]?.toLowerCase()
-  }
-
-  private extractVideoTokenFromPackedRaw(raw: unknown): string | undefined {
-    const buffer = this.decodePackedInfo(raw)
-    if (!buffer || buffer.length === 0) return undefined
-    const candidates: string[] = []
-    let current = ''
-    for (const byte of buffer) {
-      const isHex =
-        (byte >= 0x30 && byte <= 0x39) ||
-        (byte >= 0x41 && byte <= 0x46) ||
-        (byte >= 0x61 && byte <= 0x66)
-      if (isHex) {
-        current += String.fromCharCode(byte)
-        continue
-      }
-      if (current.length >= 16) candidates.push(current)
-      current = ''
-    }
-    if (current.length >= 16) candidates.push(current)
-    if (candidates.length === 0) return undefined
-
-    const exact32 = candidates.find((item) => item.length === 32)
-    if (exact32) return exact32.toLowerCase()
-
-    const fallback = candidates.find((item) => item.length >= 16 && item.length <= 64)
-    return fallback?.toLowerCase()
-  }
-
-  private decodePackedInfo(raw: any): Buffer | null {
-    if (!raw) return null
-    if (Buffer.isBuffer(raw)) return raw
-    if (raw instanceof Uint8Array) return Buffer.from(raw)
-    if (Array.isArray(raw)) return Buffer.from(raw)
-    if (typeof raw === 'string') {
-      const trimmed = raw.trim()
-      const compactHex = trimmed.replace(/\s+/g, '')
-      if (/^[a-fA-F0-9]+$/.test(compactHex) && compactHex.length % 2 === 0) {
-        try {
-          return Buffer.from(compactHex, 'hex')
-        } catch { }
-      }
-      try {
-        return Buffer.from(trimmed, 'base64')
-      } catch { }
-    }
-    if (typeof raw === 'object' && Array.isArray(raw.data)) {
-      return Buffer.from(raw.data)
-    }
-    return null
-  }
-
-  private parseVoiceDurationSeconds(content: string): number | undefined {
-    if (!content) return undefined
-    const match = /(voicelength|length|time|playlength)\s*=\s*['"]?([0-9]+(?:\.[0-9]+)?)['"]?/i.exec(content)
-    if (!match) return undefined
-    const raw = parseFloat(match[2])
-    if (!Number.isFinite(raw) || raw <= 0) return undefined
-    if (raw > 1000) return Math.round(raw / 1000)
-    return Math.round(raw)
-  }
-
-  /**
-   * 解析引用消息
-   */
-  private parseQuoteMessage(content: string): { content?: string; sender?: string } {
-    try {
-      const normalizedContent = this.decodeHtmlEntities(content || '')
-      // 提取 refermsg 部分
-      const referMsgStart = normalizedContent.indexOf('<refermsg>')
-      const referMsgEnd = normalizedContent.indexOf('</refermsg>')
-
-      if (referMsgStart === -1 || referMsgEnd === -1) {
-        return {}
-      }
-
-      const referMsgXml = normalizedContent.substring(referMsgStart, referMsgEnd + 11)
-
-      // 提取发送者名称
-      let displayName = this.extractXmlValue(referMsgXml, 'displayname')
-      // 过滤掉 wxid
-      if (displayName && this.looksLikeWxid(displayName)) {
-        displayName = ''
-      }
-
-      // 提取引用内容
-      const referContent = this.extractXmlValue(referMsgXml, 'content')
-      const referType = this.extractXmlValue(referMsgXml, 'type')
-
-      // 根据类型渲染引用内容
-      let displayContent = referContent
-      switch (referType) {
-        case '1':
-          // 文本消息优先取“部分引用”字段，缺失时再回退到完整 content
-          displayContent = this.extractPreferredQuotedText(referMsgXml)
-          break
-        case '3':
-          displayContent = '[图片]'
-          break
-        case '34':
-          displayContent = '[语音]'
-          break
-        case '43':
-          displayContent = '[视频]'
-          break
-        case '47':
-          displayContent = '[动画表情]'
-          break
-        case '49': {
-          // 链接类消息 (type=49)：需区分真正的链接和嵌套引用
-          // 嵌套引用的 referContent 中 xmlType=57，真正的链接 xmlType=49 或 5
-          const decodedReferContent = this.decodeHtmlEntities(referContent || '')
-          const innerInfo = this.parseType49Message(decodedReferContent)
-          if (innerInfo.xmlType === '57' && innerInfo.linkTitle) {
-            displayContent = innerInfo.linkTitle
-          } else {
-            displayContent = '[链接]'
-          }
-          break
-        }
-        case '42':
-          displayContent = '[名片]'
-          break
-        case '48':
-          displayContent = '[位置]'
-          break
-        default:
-          if (!referContent || referContent.includes('wxid_')) {
-            displayContent = '[消息]'
-          } else {
-            displayContent = this.sanitizeQuotedContent(referContent)
-          }
-      }
-
-      return {
-        content: displayContent,
-        sender: displayName || undefined
-      }
-    } catch {
-      return {}
-    }
-  }
-
-  /**
-   * 解析媒体消息(图片/视频/语音)中的引用信息
-   * 这些消息的引用信息在 <extcommoninfo><refermsg> 中
-   */
-  private parseMediaQuoteMessage(content: string, sessionId: string): { content?: string; sender?: string } {
-    try {
-      const normalizedContent = this.decodeHtmlEntities(content || '')
-      const referMsgStart = normalizedContent.indexOf('<refermsg>')
-      const referMsgEnd = normalizedContent.indexOf('</refermsg>')
-
-      if (referMsgStart === -1 || referMsgEnd === -1) {
-        return {}
-      }
-
-      const referMsgXml = normalizedContent.substring(referMsgStart, referMsgEnd + 11)
-      const svrid = this.extractXmlValue(referMsgXml, 'svrid')
-
-      this.debugQuoteLog('parseMediaQuoteMessage - svrid:', svrid)
-
-      if (!svrid) {
-        return {}
-      }
-
-      // 简化方案:返回 svrid 标记
-      this.debugQuoteLog('parseMediaQuoteMessage - 返回标记:', `__SVRID__${svrid}__`)
-      return { content: `__SVRID__${svrid}__` }
-    } catch {
-      return {}
-    }
+  mapRowsToMessagesForApi(rows: Record<string, any>[], sessionId: string): Message[] {
+    const myWxid = String(this.configService.getMyWxidCleaned() || '').trim()
+    return mapRowsToMessages(rows, sessionId, myWxid)
   }
 
   private isChatQuoteDebugEnabled(): boolean {
@@ -5894,12 +4260,12 @@ class ChatService {
           messageContentLength: rawMessageContent ? rawMessageContent.length : 0
         })
 
-        const content = this.decodeMessageContent(rawMessageContent, rawCompressContent)
+        const content = decodeMessageContent(rawMessageContent, rawCompressContent)
 
         this.debugQuoteLog('resolveQuotedMessages - 解码后:', { localType, contentLength: content.length, contentPreview: content.substring(0, 50) })
 
         if (localType === 1) {
-          msg.quotedContent = this.sanitizeQuotedContent(content)
+          msg.quotedContent = sanitizeQuotedContent(content)
         } else if (localType === 3) {
           msg.quotedContent = '[图片]'
         } else if (localType === 34) {
@@ -5922,642 +4288,6 @@ class ChatService {
     this.debugQuoteLog('resolveQuotedMessages - 完成')
   }
 
-  private extractPreferredQuotedText(referMsgXml: string): string {
-    if (!referMsgXml) return ''
-
-    const sources = [this.decodeHtmlEntities(referMsgXml)]
-    const rawMsgSource = this.extractXmlValue(referMsgXml, 'msgsource')
-    if (rawMsgSource) {
-      const decodedMsgSource = this.decodeHtmlEntities(rawMsgSource)
-      if (decodedMsgSource) {
-        sources.push(decodedMsgSource)
-      }
-    }
-
-    const fullContent = this.sanitizeQuotedContent(this.extractXmlValue(sources[0] || referMsgXml, 'content'))
-    const partialText = this.extractPartialQuotedText(sources[0] || referMsgXml, fullContent)
-    if (partialText) return partialText
-
-    const candidateTags = [
-      'selectedcontent',
-      'selectedtext',
-      'selectcontent',
-      'selecttext',
-      'quotecontent',
-      'quotetext',
-      'partcontent',
-      'parttext',
-      'excerpt',
-      'summary',
-      'preview'
-    ]
-
-    for (const source of sources) {
-      for (const tag of candidateTags) {
-        const value = this.sanitizeQuotedContent(this.extractXmlValue(source, tag))
-        if (value) return value
-      }
-    }
-
-    return fullContent
-  }
-
-  private extractPartialQuotedText(xml: string, fullContent: string): string {
-    if (!xml || !fullContent) return ''
-
-    const startChar = this.extractXmlValue(xml, 'start')
-    const endChar = this.extractXmlValue(xml, 'end')
-    const startIndexRaw = this.extractXmlValue(xml, 'startindex')
-    const endIndexRaw = this.extractXmlValue(xml, 'endindex')
-    const startIndex = Number.parseInt(startIndexRaw, 10)
-    const endIndex = Number.parseInt(endIndexRaw, 10)
-
-    if (startChar && endChar) {
-      const startPos = fullContent.indexOf(startChar)
-      if (startPos !== -1) {
-        const endPos = fullContent.indexOf(endChar, startPos + startChar.length - 1)
-        if (endPos !== -1 && endPos >= startPos) {
-          const sliced = fullContent.slice(startPos, endPos + endChar.length).trim()
-          if (sliced) return sliced
-        }
-      }
-    }
-
-    if (Number.isFinite(startIndex) && Number.isFinite(endIndex) && endIndex >= startIndex) {
-      const chars = Array.from(fullContent)
-      const sliced = chars.slice(startIndex, endIndex + 1).join('').trim()
-      if (sliced) return sliced
-    }
-
-    return ''
-  }
-
-  /**
-   * 解析名片消息
-   * 格式: <msg username="wxid_xxx" nickname="昵称" ... />
-   */
-  private parseCardInfo(content: string): { username?: string; nickname?: string; avatarUrl?: string } {
-    try {
-      if (!content) return {}
-
-      // 提取 username
-      const username = this.extractXmlAttribute(content, 'msg', 'username') || undefined
-
-      // 提取 nickname
-      const nickname = this.extractXmlAttribute(content, 'msg', 'nickname') || undefined
-
-      // 提取头像
-      const avatarUrl = this.extractXmlAttribute(content, 'msg', 'bigheadimgurl') ||
-        this.extractXmlAttribute(content, 'msg', 'smallheadimgurl') || undefined
-
-      return { username, nickname, avatarUrl }
-    } catch (e) {
-      console.error('[ChatService] 名片解析失败:', e)
-      return {}
-    }
-  }
-
-  /**
-   * 解析 Type 49 消息（链接、文件、小程序、转账等）
-   * 根据 <appmsg><type>X</type> 区分不同类型
-   */
-  private parseType49Message(content: string): {
-    xmlType?: string
-    quotedContent?: string
-    quotedSender?: string
-    linkTitle?: string
-    linkUrl?: string
-    linkThumb?: string
-    appMsgKind?: string
-    appMsgDesc?: string
-    appMsgAppName?: string
-    appMsgSourceName?: string
-    appMsgSourceUsername?: string
-    appMsgThumbUrl?: string
-    appMsgMusicUrl?: string
-    appMsgDataUrl?: string
-    appMsgLocationLabel?: string
-    finderNickname?: string
-    finderUsername?: string
-    finderCoverUrl?: string
-    finderAvatar?: string
-    finderDuration?: number
-    locationLat?: number
-    locationLng?: number
-    locationPoiname?: string
-    locationLabel?: string
-    musicAlbumUrl?: string
-    musicUrl?: string
-    giftImageUrl?: string
-    giftWish?: string
-    giftPrice?: string
-    cardAvatarUrl?: string
-    fileName?: string
-    fileSize?: number
-    fileExt?: string
-    fileMd5?: string
-    transferPayerUsername?: string
-    transferReceiverUsername?: string
-    chatRecordTitle?: string
-    chatRecordList?: Array<{
-      datatype: number
-      sourcename: string
-      sourcetime: string
-      sourceheadurl?: string
-      datadesc?: string
-      datatitle?: string
-      fileext?: string
-      datasize?: number
-      messageuuid?: string
-      dataurl?: string
-      datathumburl?: string
-      datacdnurl?: string
-      cdndatakey?: string
-      cdnthumbkey?: string
-      aeskey?: string
-      md5?: string
-      fullmd5?: string
-      thumbfullmd5?: string
-      srcMsgLocalid?: number
-      imgheight?: number
-      imgwidth?: number
-      duration?: number
-      chatRecordTitle?: string
-      chatRecordDesc?: string
-      chatRecordList?: any[]
-    }>
-  } {
-    try {
-      if (!content) return {}
-
-      // 提取 appmsg 直接子节点的 type，避免匹配到 refermsg 内部的 <type>
-      // 先尝试从 <appmsg>...</appmsg> 块内提取，再用正则跳过嵌套标签
-      let xmlType = ''
-      const appmsgMatch = /<appmsg[\s\S]*?>([\s\S]*?)<\/appmsg>/i.exec(content)
-      if (appmsgMatch) {
-        // 在 appmsg 内容中，找第一个 <type> 但跳过在子元素内部的（如 refermsg > type）
-        // 策略：去掉所有嵌套块（refermsg、patMsg 等），再提取 type
-        const appmsgInner = appmsgMatch[1]
-          .replace(/<refermsg[\s\S]*?<\/refermsg>/gi, '')
-          .replace(/<patMsg[\s\S]*?<\/patMsg>/gi, '')
-        const typeMatch = /<type>([\s\S]*?)<\/type>/i.exec(appmsgInner)
-        if (typeMatch) xmlType = typeMatch[1].trim()
-      }
-      if (!xmlType) xmlType = this.extractXmlValue(content, 'type')
-      if (!xmlType) return {}
-
-      const result: any = { xmlType }
-
-      // 提取通用字段
-      const title = this.extractXmlValue(content, 'title')
-      const url = this.extractXmlValue(content, 'url')
-      const desc = this.extractXmlValue(content, 'des') || this.extractXmlValue(content, 'description')
-      const appName = this.extractXmlValue(content, 'appname')
-      const sourceName = this.extractXmlValue(content, 'sourcename')
-      const sourceUsername = this.extractXmlValue(content, 'sourceusername')
-      const thumbUrl =
-        this.extractXmlValue(content, 'thumburl') ||
-        this.extractXmlValue(content, 'cdnthumburl') ||
-        this.extractXmlValue(content, 'cover') ||
-        this.extractXmlValue(content, 'coverurl') ||
-        this.extractXmlValue(content, 'thumb_url')
-      const musicUrl =
-        this.extractXmlValue(content, 'musicurl') ||
-        this.extractXmlValue(content, 'playurl') ||
-        this.extractXmlValue(content, 'songalbumurl')
-      const dataUrl = this.extractXmlValue(content, 'dataurl') || this.extractXmlValue(content, 'lowurl')
-      const locationLabel =
-        this.extractXmlAttribute(content, 'location', 'label') ||
-        this.extractXmlAttribute(content, 'location', 'poiname') ||
-        this.extractXmlValue(content, 'label') ||
-        this.extractXmlValue(content, 'poiname')
-      const finderUsername =
-        this.extractXmlValue(content, 'finderusername') ||
-        this.extractXmlValue(content, 'finder_username') ||
-        this.extractXmlValue(content, 'finderuser')
-      const finderNickname =
-        this.extractXmlValue(content, 'findernickname') ||
-        this.extractXmlValue(content, 'finder_nickname')
-      const normalized = content.toLowerCase()
-      const isFinder = xmlType === '51'
-      const isRedPacket = xmlType === '2001'
-      const isMusic = xmlType === '3'
-      const isLocation = Boolean(locationLabel)
-
-      result.linkTitle = title || undefined
-      result.linkUrl = url || undefined
-      result.linkThumb = thumbUrl || undefined
-      result.appMsgDesc = desc || undefined
-      result.appMsgAppName = appName || undefined
-      result.appMsgSourceName = sourceName || undefined
-      result.appMsgSourceUsername = sourceUsername || undefined
-      result.appMsgThumbUrl = thumbUrl || undefined
-      result.appMsgMusicUrl = musicUrl || undefined
-      result.appMsgDataUrl = dataUrl || undefined
-      result.appMsgLocationLabel = locationLabel || undefined
-      result.finderUsername = finderUsername || undefined
-      result.finderNickname = finderNickname || undefined
-
-      // 视频号封面/头像/时长
-      if (isFinder) {
-        const finderCover =
-          this.extractXmlValue(content, 'thumbUrl') ||
-          this.extractXmlValue(content, 'coverUrl') ||
-          this.extractXmlValue(content, 'thumburl') ||
-          this.extractXmlValue(content, 'coverurl')
-        if (finderCover) result.finderCoverUrl = finderCover
-        const finderAvatar = this.extractXmlValue(content, 'avatar')
-        if (finderAvatar) result.finderAvatar = finderAvatar
-        const durationStr = this.extractXmlValue(content, 'videoPlayDuration') || this.extractXmlValue(content, 'duration')
-        if (durationStr) {
-          const d = parseInt(durationStr, 10)
-          if (Number.isFinite(d) && d > 0) result.finderDuration = d
-        }
-      }
-
-      // 位置经纬度
-      if (isLocation) {
-        const latAttr = this.extractXmlAttribute(content, 'location', 'x') || this.extractXmlAttribute(content, 'location', 'latitude')
-        const lngAttr = this.extractXmlAttribute(content, 'location', 'y') || this.extractXmlAttribute(content, 'location', 'longitude')
-        if (latAttr) { const v = parseFloat(latAttr); if (Number.isFinite(v)) result.locationLat = v }
-        if (lngAttr) { const v = parseFloat(lngAttr); if (Number.isFinite(v)) result.locationLng = v }
-        result.locationPoiname = this.extractXmlAttribute(content, 'location', 'poiname') || locationLabel || undefined
-        result.locationLabel = this.extractXmlAttribute(content, 'location', 'label') || undefined
-      }
-
-      // 音乐专辑封面
-      if (isMusic) {
-        const albumUrl = this.extractXmlValue(content, 'songalbumurl')
-        if (albumUrl) result.musicAlbumUrl = albumUrl
-        result.musicUrl = musicUrl || dataUrl || url || undefined
-      }
-
-      // 礼物消息
-      const isGift = xmlType === '115'
-      if (isGift) {
-        result.giftWish = this.extractXmlValue(content, 'wishmessage') || undefined
-        result.giftImageUrl = this.extractXmlValue(content, 'skuimgurl') || undefined
-        result.giftPrice = this.extractXmlValue(content, 'skuprice') || undefined
-      }
-
-      if (isFinder) {
-        result.appMsgKind = 'finder'
-      } else if (isRedPacket) {
-        result.appMsgKind = 'red-packet'
-      } else if (isGift) {
-        result.appMsgKind = 'gift'
-      } else if (isLocation) {
-        result.appMsgKind = 'location'
-      } else if (isMusic) {
-        result.appMsgKind = 'music'
-      } else if (xmlType === '33' || xmlType === '36') {
-        result.appMsgKind = 'miniapp'
-      } else if (xmlType === '6') {
-        result.appMsgKind = 'file'
-      } else if (xmlType === '19') {
-        result.appMsgKind = 'chat-record'
-      } else if (xmlType === '2000') {
-        result.appMsgKind = 'transfer'
-      } else if (xmlType === '87') {
-        result.appMsgKind = 'announcement'
-      } else if (xmlType === '57') {
-        // 引用回复消息，解析 refermsg
-        result.appMsgKind = 'quote'
-        const quoteInfo = this.parseQuoteMessage(content)
-        result.quotedContent = quoteInfo.content
-        result.quotedSender = quoteInfo.sender
-      } else if (xmlType === '53') {
-        result.appMsgKind = 'solitaire'
-      } else if ((xmlType === '5' || xmlType === '49') && (sourceUsername?.startsWith('gh_') || appName?.includes('公众号') || sourceName)) {
-        result.appMsgKind = 'official-link'
-      } else if (url) {
-        result.appMsgKind = 'link'
-      } else {
-        result.appMsgKind = 'card'
-      }
-
-      switch (xmlType) {
-        case '6': {
-          // 文件消息
-          result.fileName = title || this.extractXmlValue(content, 'filename')
-          result.linkTitle = result.fileName
-
-          // 提取文件大小
-          const fileSizeStr = this.extractXmlValue(content, 'totallen') ||
-            this.extractXmlValue(content, 'filesize')
-          if (fileSizeStr) {
-            const size = parseInt(fileSizeStr, 10)
-            if (!isNaN(size)) {
-              result.fileSize = size
-            }
-          }
-
-          // 提取文件扩展名
-          const fileExt = this.extractXmlValue(content, 'fileext')
-          const fileMd5 = this.extractXmlValue(content, 'md5') || this.extractXmlValue(content, 'filemd5')
-          if (fileExt) {
-            result.fileExt = fileExt
-          } else if (result.fileName) {
-            // 从文件名提取扩展名
-            const match = /\.([^.]+)$/.exec(result.fileName)
-            if (match) {
-              result.fileExt = match[1]
-            }
-          }
-          if (fileMd5) {
-            result.fileMd5 = fileMd5.toLowerCase()
-          }
-          break
-        }
-
-        case '19': {
-          // 聊天记录
-          result.chatRecordTitle = title || '聊天记录'
-          const recordList = this.parseForwardChatRecordList(content)
-          if (recordList && recordList.length > 0) {
-            result.chatRecordList = recordList
-          }
-          break
-        }
-
-        case '33':
-        case '36': {
-          // 小程序
-          result.linkTitle = title
-          result.linkUrl = url
-
-          // 提取缩略图
-          const thumbUrl = this.extractXmlValue(content, 'thumburl') ||
-            this.extractXmlValue(content, 'cdnthumburl')
-          if (thumbUrl) {
-            result.linkThumb = thumbUrl
-          }
-          break
-        }
-
-        case '2000': {
-          // 转账
-          result.linkTitle = title || '[转账]'
-
-          // 可以提取转账金额等信息
-          const payMemo = this.extractXmlValue(content, 'pay_memo')
-          const feedesc = this.extractXmlValue(content, 'feedesc')
-
-          if (payMemo) {
-            result.linkTitle = payMemo
-          } else if (feedesc) {
-            result.linkTitle = feedesc
-          }
-
-          // 提取转账双方 wxid
-          const payerUsername = this.extractXmlValue(content, 'payer_username')
-          const receiverUsername = this.extractXmlValue(content, 'receiver_username')
-          if (payerUsername) {
-            result.transferPayerUsername = payerUsername
-          }
-          if (receiverUsername) {
-            result.transferReceiverUsername = receiverUsername
-          }
-          break
-        }
-
-        default: {
-          // 其他类型，提取通用字段
-          result.linkTitle = title
-          result.linkUrl = url
-
-          const thumbUrl = this.extractXmlValue(content, 'thumburl') ||
-            this.extractXmlValue(content, 'cdnthumburl')
-          if (thumbUrl) {
-            result.linkThumb = thumbUrl
-          }
-        }
-      }
-
-      return result
-    } catch (e) {
-      console.error('[ChatService] Type 49 消息解析失败:', e)
-      return {}
-    }
-  }
-
-  private parseForwardChatRecordList(content: string): any[] | undefined {
-    const normalized = this.decodeHtmlEntities(content || '')
-    if (!normalized.includes('<recorditem') && !normalized.includes('<dataitem')) {
-      return undefined
-    }
-
-    const items: any[] = []
-    const dedupe = new Set<string>()
-    const recordItemRegex = /<recorditem>([\s\S]*?)<\/recorditem>/gi
-    let recordItemMatch: RegExpExecArray | null
-    while ((recordItemMatch = recordItemRegex.exec(normalized)) !== null) {
-      const parsed = this.parseForwardChatRecordContainer(recordItemMatch[1] || '')
-      for (const item of parsed) {
-        const key = `${item.datatype}|${item.sourcename}|${item.sourcetime}|${item.datadesc || ''}|${item.datatitle || ''}|${item.messageuuid || ''}`
-        if (!dedupe.has(key)) {
-          dedupe.add(key)
-          items.push(item)
-        }
-      }
-    }
-
-    if (items.length === 0 && normalized.includes('<dataitem')) {
-      const parsed = this.parseForwardChatRecordContainer(normalized)
-      for (const item of parsed) {
-        const key = `${item.datatype}|${item.sourcename}|${item.sourcetime}|${item.datadesc || ''}|${item.datatitle || ''}|${item.messageuuid || ''}`
-        if (!dedupe.has(key)) {
-          dedupe.add(key)
-          items.push(item)
-        }
-      }
-    }
-
-    return items.length > 0 ? items : undefined
-  }
-
-  private extractTopLevelXmlElements(source: string, tagName: string): Array<{ attrs: string; inner: string }> {
-    const xml = source || ''
-    if (!xml) return []
-
-    const pattern = new RegExp(`<(/?)${tagName}\\b([^>]*)>`, 'gi')
-    const result: Array<{ attrs: string; inner: string }> = []
-    let match: RegExpExecArray | null
-    let depth = 0
-    let openEnd = -1
-    let openStart = -1
-    let openAttrs = ''
-
-    while ((match = pattern.exec(xml)) !== null) {
-      const isClosing = match[1] === '/'
-      const attrs = match[2] || ''
-      const rawTag = match[0] || ''
-      const selfClosing = !isClosing && /\/\s*>$/.test(rawTag)
-
-      if (!isClosing) {
-        if (depth === 0) {
-          openStart = match.index
-          openEnd = pattern.lastIndex
-          openAttrs = attrs
-        }
-        if (!selfClosing) {
-          depth += 1
-        } else if (depth === 0 && openEnd >= 0) {
-          result.push({ attrs: openAttrs, inner: '' })
-          openStart = -1
-          openEnd = -1
-          openAttrs = ''
-        }
-        continue
-      }
-
-      if (depth <= 0) continue
-      depth -= 1
-      if (depth === 0 && openEnd >= 0 && openStart >= 0) {
-        result.push({
-          attrs: openAttrs,
-          inner: xml.slice(openEnd, match.index)
-        })
-        openStart = -1
-        openEnd = -1
-        openAttrs = ''
-      }
-    }
-
-    return result
-  }
-
-  private parseForwardChatRecordContainer(containerXml: string): any[] {
-    const source = containerXml || ''
-    if (!source) return []
-
-    const segments: string[] = [source]
-    const decodedContainer = this.decodeHtmlEntities(source)
-    if (decodedContainer !== source) {
-      segments.push(decodedContainer)
-    }
-
-    const cdataRegex = /<!\[CDATA\[([\s\S]*?)\]\]>/g
-    let cdataMatch: RegExpExecArray | null
-    while ((cdataMatch = cdataRegex.exec(source)) !== null) {
-      const cdataInner = cdataMatch[1] || ''
-      if (!cdataInner) continue
-      segments.push(cdataInner)
-      const decodedInner = this.decodeHtmlEntities(cdataInner)
-      if (decodedInner !== cdataInner) {
-        segments.push(decodedInner)
-      }
-    }
-
-    const items: any[] = []
-    const seen = new Set<string>()
-    for (const segment of segments) {
-      if (!segment) continue
-      const dataItems = this.extractTopLevelXmlElements(segment, 'dataitem')
-      for (const dataItem of dataItems) {
-        const parsed = this.parseForwardChatRecordDataItem(dataItem.inner || '', dataItem.attrs || '')
-        if (!parsed) continue
-        const key = `${parsed.datatype}|${parsed.sourcename}|${parsed.sourcetime}|${parsed.datadesc || ''}|${parsed.datatitle || ''}|${parsed.messageuuid || ''}`
-        if (!seen.has(key)) {
-          seen.add(key)
-          items.push(parsed)
-        }
-      }
-    }
-
-    if (items.length > 0) return items
-    const fallback = this.parseForwardChatRecordDataItem(source, '')
-    return fallback ? [fallback] : []
-  }
-
-  private parseForwardChatRecordDataItem(itemXml: string, attrs: string): any | null {
-    const datatypeMatch = /datatype\s*=\s*["']?(\d+)["']?/i.exec(attrs || '')
-    const datatype = datatypeMatch ? parseInt(datatypeMatch[1], 10) : parseInt(this.extractXmlValue(itemXml, 'datatype') || '0', 10)
-    const sourcename = this.decodeHtmlEntities(this.extractXmlValue(itemXml, 'sourcename') || '')
-    const sourcetime = this.extractXmlValue(itemXml, 'sourcetime') || ''
-    const sourceheadurl = this.extractXmlValue(itemXml, 'sourceheadurl') || undefined
-    const datadesc = this.decodeHtmlEntities(
-      this.extractXmlValue(itemXml, 'datadesc') ||
-      this.extractXmlValue(itemXml, 'content') ||
-      ''
-    ) || undefined
-    const datatitle = this.decodeHtmlEntities(this.extractXmlValue(itemXml, 'datatitle') || '') || undefined
-    const fileext = this.extractXmlValue(itemXml, 'fileext') || undefined
-    const datasize = parseInt(this.extractXmlValue(itemXml, 'datasize') || '0', 10) || undefined
-    const messageuuid = this.extractXmlValue(itemXml, 'messageuuid') || undefined
-    const dataurl = this.decodeHtmlEntities(this.extractXmlValue(itemXml, 'dataurl') || '') || undefined
-    const datathumburl = this.decodeHtmlEntities(
-      this.extractXmlValue(itemXml, 'datathumburl') ||
-      this.extractXmlValue(itemXml, 'thumburl') ||
-      this.extractXmlValue(itemXml, 'cdnthumburl') ||
-      ''
-    ) || undefined
-    const datacdnurl = this.decodeHtmlEntities(
-      this.extractXmlValue(itemXml, 'datacdnurl') ||
-      this.extractXmlValue(itemXml, 'cdnurl') ||
-      this.extractXmlValue(itemXml, 'cdndataurl') ||
-      ''
-    ) || undefined
-    const cdndatakey = this.extractXmlValue(itemXml, 'cdndatakey') || undefined
-    const cdnthumbkey = this.extractXmlValue(itemXml, 'cdnthumbkey') || undefined
-    const aeskey = this.decodeHtmlEntities(
-      this.extractXmlValue(itemXml, 'aeskey') ||
-      this.extractXmlValue(itemXml, 'qaeskey') ||
-      ''
-    ) || undefined
-    const md5 = this.extractXmlValue(itemXml, 'md5') || this.extractXmlValue(itemXml, 'datamd5') || undefined
-    const fullmd5 = this.extractXmlValue(itemXml, 'fullmd5') || undefined
-    const thumbfullmd5 = this.extractXmlValue(itemXml, 'thumbfullmd5') || undefined
-    const srcMsgLocalid = parseInt(this.extractXmlValue(itemXml, 'srcMsgLocalid') || '0', 10) || undefined
-    const imgheight = parseInt(this.extractXmlValue(itemXml, 'imgheight') || '0', 10) || undefined
-    const imgwidth = parseInt(this.extractXmlValue(itemXml, 'imgwidth') || '0', 10) || undefined
-    const duration = parseInt(this.extractXmlValue(itemXml, 'duration') || '0', 10) || undefined
-    const nestedRecordXml = this.extractXmlValue(itemXml, 'recordxml') || undefined
-    const chatRecordTitle = this.decodeHtmlEntities(
-      (nestedRecordXml && this.extractXmlValue(nestedRecordXml, 'title')) ||
-      datatitle ||
-      ''
-    ) || undefined
-    const chatRecordDesc = this.decodeHtmlEntities(
-      (nestedRecordXml && this.extractXmlValue(nestedRecordXml, 'desc')) ||
-      datadesc ||
-      ''
-    ) || undefined
-    const chatRecordList =
-      datatype === 17 && nestedRecordXml
-        ? this.parseForwardChatRecordContainer(nestedRecordXml)
-        : undefined
-
-    if (!(datatype || sourcename || datadesc || datatitle || messageuuid || srcMsgLocalid)) return null
-
-    return {
-      datatype: Number.isFinite(datatype) ? datatype : 0,
-      sourcename,
-      sourcetime,
-      sourceheadurl,
-      datadesc,
-      datatitle,
-      fileext,
-      datasize,
-      messageuuid,
-      dataurl,
-      datathumburl,
-      datacdnurl,
-      cdndatakey,
-      cdnthumbkey,
-      aeskey,
-      md5,
-      fullmd5,
-      thumbfullmd5,
-      srcMsgLocalid,
-      imgheight,
-      imgwidth,
-      duration,
-      chatRecordTitle,
-      chatRecordDesc,
-      chatRecordList
-    }
-  }
 
   //手动查找 media_*.db 文件（当 WCDB数据服务不支持 listMediaDbs 时的 fallback）
   private async findMediaDbsManually(): Promise<string[]> {
@@ -6767,7 +4497,7 @@ class ChatService {
     rawContent: string
   ): Promise<string | null> {
     const directSender = row.sender_username
-      || this.extractSenderUsernameFromContent(rawContent)
+      || extractSenderUsernameFromContent(rawContent)
     if (directSender) {
       return directSender
     }
@@ -6784,334 +4514,9 @@ class ChatService {
   /**
    * 判断是否像 wxid
    */
-  private looksLikeWxid(text: string): boolean {
-    if (!text) return false
-    const trimmed = text.trim().toLowerCase()
-    if (trimmed.startsWith('wxid_')) return true
-    return /^wx[a-z0-9_-]{4,}$/.test(trimmed)
-  }
-
-  /**
-   * 清理引用内容中的 wxid
-   */
-  private sanitizeQuotedContent(content: string): string {
-    if (!content) return ''
-    let result = content
-    // 去掉 wxid_xxx
-    result = result.replace(/wxid_[A-Za-z0-9_-]{3,}/g, '')
-    // 去掉开头的分隔符
-    result = result.replace(/^[\s:：\-]+/, '')
-    // 折叠重复分隔符
-    result = result.replace(/[:：]{2,}/g, ':')
-    result = result.replace(/^[\s:：\-]+/, '')
-    // 标准化空白
-    result = result.replace(/\s+/g, ' ').trim()
-    return result
-  }
-
-  private getMessageTypeLabel(localType: number): string {
-    const labels: Record<number, string> = {
-      1: '[文本]',
-      3: '[图片]',
-      34: '[语音]',
-      42: '[名片]',
-      43: '[视频]',
-      47: '[动画表情]',
-      48: '[位置]',
-      49: '[链接]',
-      50: '[通话]',
-      10000: '[系统消息]',
-      244813135921: '[引用消息]',
-      266287972401: '拍一拍',
-      81604378673: '[聊天记录]',
-      154618822705: '[小程序]',
-      8594229559345: '[红包]',
-      8589934592049: '[转账]',
-      34359738417: '[文件]',
-      103079215153: '[文件]',
-      25769803825: '[文件]'
-    }
-    return labels[localType] || '[消息]'
-  }
-
-  private extractXmlValue(xml: string, tagName: string): string {
-    const regex = new RegExp(`<${tagName}>([\\s\\S]*?)</${tagName}>`, 'i')
-    const match = regex.exec(xml)
-    if (match) {
-      return match[1].replace(/<!\[CDATA\[/g, '').replace(/\]\]>/g, '').trim()
-    }
-    return ''
-  }
-
-  private extractXmlAttribute(xml: string, tagName: string, attrName: string): string {
-    // 匹配 <tagName ... attrName="value" ... /> 或 <tagName ... attrName="value" ...>
-    const regex = new RegExp(`<${tagName}[^>]*\\s${attrName}\\s*=\\s*['"]([^'"]*)['"']`, 'i')
-    const match = regex.exec(xml)
-    return match ? match[1] : ''
-  }
-
-  private cleanSystemMessage(content: string): string {
-    if (!content) return '[系统消息]'
-
-    const normalized = this.cleanUtf16(this.decodeHtmlEntities(String(content)))
-    const readableSysmsg = this.extractReadableSystemMessageText(normalized)
-    if (readableSysmsg) {
-      return readableSysmsg
-    }
-
-    // 移除 XML 声明
-    let cleaned = normalized.replace(/<\?xml[^?]*\?>/gi, '')
-    // 移除所有 XML/HTML 标签
-    cleaned = cleaned.replace(/<[^>]+>/g, '')
-    // 移除尾部的数字（如撤回消息后的时间戳）
-    cleaned = cleaned.replace(/\d+\s*$/, '')
-    // 清理多余空白
-    cleaned = this.stripSenderPrefix(cleaned).replace(/\s+/g, ' ').trim()
-    return cleaned || '[系统消息]'
-  }
-
-  private extractReadableSystemMessageText(content: string): string {
-    const sysmsgMatch = /<sysmsg\b[^>]*>([\s\S]*?)<\/sysmsg>/i.exec(content)
-    const source = sysmsgMatch?.[1] || content
-    const text =
-      this.extractXmlValue(source, 'plain') ||
-      this.extractXmlValue(source, 'text') ||
-      ''
-    return this.stripSenderPrefix(text).replace(/\s+/g, ' ').trim()
-  }
-
-  private stripSenderPrefix(content: string): string {
-    return content.replace(/^[\s]*([a-zA-Z0-9_@-]+):(?!\/\/)(?:\s*(?:\r?\n|<br\s*\/?>)\s*|\s*)/i, '')
-  }
-
-  private extractSenderUsernameFromContent(content: string): string | null {
-    if (!content) return null
-
-    const normalized = this.cleanUtf16(this.decodeHtmlEntities(String(content)))
-    const match = /^\s*([a-zA-Z0-9_@-]{4,}):(?!\/\/)\s*(?:\r?\n|<br\s*\/?>)/i.exec(normalized)
-    if (!match?.[1]) return null
-
-    const candidate = match[1].trim()
-    return candidate || null
-  }
-
-  private decodeHtmlEntities(content: string): string {
-    return content
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&apos;/g, "'")
-  }
-
-  private cleanString(str: string): string {
-    if (!str) return ''
-    if (Buffer.isBuffer(str)) {
-      str = str.toString('utf-8')
-    }
-    return this.cleanUtf16(String(str))
-  }
-
-  private cleanUtf16(input: string): string {
-    if (!input) return input
-    try {
-      const cleaned = input.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]/g, '')
-      const codeUnits = cleaned.split('').map((c) => c.charCodeAt(0))
-      const validUnits: number[] = []
-      for (let i = 0; i < codeUnits.length; i += 1) {
-        const unit = codeUnits[i]
-        if (unit >= 0xd800 && unit <= 0xdbff) {
-          if (i + 1 < codeUnits.length) {
-            const nextUnit = codeUnits[i + 1]
-            if (nextUnit >= 0xdc00 && nextUnit <= 0xdfff) {
-              validUnits.push(unit, nextUnit)
-              i += 1
-              continue
-            }
-          }
-          continue
-        }
-        if (unit >= 0xdc00 && unit <= 0xdfff) {
-          continue
-        }
-        validUnits.push(unit)
-      }
-      return String.fromCharCode(...validUnits)
-    } catch {
-      return input.replace(/[^\u0020-\u007E\u4E00-\u9FFF\u3000-\u303F]/g, '')
-    }
-  }
-
-  /**
-   * 清理拍一拍消息
-   * 格式示例:
-   *   纯文本: 我拍了拍 "XX" 
-   *   XML: <msg><appmsg...><title>"XX"拍了拍"XX"相信未来!</title>...</msg>
-   */
-  private cleanPatMessage(content: string): string {
-    if (!content) return '拍一拍'
-
-    // 1. 优先从 XML <title> 标签提取内容
-    const titleMatch = /<title>([\s\S]*?)<\/title>/i.exec(content)
-    if (titleMatch) {
-      const title = titleMatch[1]
-        .replace(/<!\[CDATA\[/g, '')
-        .replace(/\]\]>/g, '')
-        .trim()
-      if (title) {
-        return title
-      }
-    }
-
-    // 2. 尝试匹配标准的 "A拍了拍B" 格式
-    const match = /^(.+?拍了拍.+?)(?:[\r\n]|$|ງ|wxid_)/.exec(content)
-    if (match) {
-      return match[1].trim()
-    }
-
-    // 3. 如果匹配失败，尝试清理掉疑似的 garbage (wxid, 乱码)
-    let cleaned = content.replace(/wxid_[a-zA-Z0-9_-]+/g, '') // 移除 wxid
-    cleaned = cleaned.replace(/[ງ໐໓ຖiht]+/g, ' ') // 移除已知的乱码字符
-    cleaned = cleaned.replace(/\d{6,}/g, '') // 移除长数字
-    cleaned = cleaned.replace(/\s+/g, ' ').trim() // 清理空格
-
-    // 移除不可见字符
-    cleaned = this.cleanUtf16(cleaned)
-
-    // 如果清理后还有内容，返回
-    if (cleaned && cleaned.length > 1 && !cleaned.includes('xml')) {
-      return cleaned
-    }
-
-    return '拍一拍'
-  }
-
-  /**
-   * 解码消息内容（处理 BLOB 和压缩数据）
-   */
-  private decodeMessageContent(messageContent: any, compressContent: any): string {
-    // 优先使用 compress_content
-    let content = this.decodeMaybeCompressed(compressContent, 'compress_content')
-    if (!content || content.length === 0) {
-      content = this.decodeMaybeCompressed(messageContent, 'message_content')
-    }
-    return content
-  }
-
-  /**
-   * 尝试解码可能压缩的内容
-   */
-  private decodeMaybeCompressed(raw: any, fieldName: string = 'unknown'): string {
-    if (!raw) return ''
-
-    // 
-
-    // 如果是 Buffer/Uint8Array
-    if (Buffer.isBuffer(raw) || raw instanceof Uint8Array) {
-      return this.decodeBinaryContent(Buffer.from(raw), String(raw))
-    }
-
-    // 如果是字符串
-    if (typeof raw === 'string') {
-      if (raw.length === 0) return ''
-      const compactRaw = this.compactEncodedPayload(raw)
-
-      // 检查是否是 hex 编码
-      // 只有当字符串足够长（超过16字符）且看起来像 hex 时才尝试解码
-      // 短字符串（如 "123456" 等纯数字）容易被误判为 hex
-      if (compactRaw.length > 16 && this.looksLikeHex(compactRaw)) {
-        const bytes = Buffer.from(compactRaw, 'hex')
-        if (bytes.length > 0) {
-          const result = this.decodeBinaryContent(bytes, raw)
-          // 
-          return result
-        }
-      }
-
-      // 检查是否是 base64 编码
-      // 只有当字符串足够长（超过16字符）且看起来像 base64 时才尝试解码
-      // 短字符串（如 "test", "home" 等）容易被误判为 base64
-      if (compactRaw.length > 16 && this.looksLikeBase64(compactRaw)) {
-        try {
-          const bytes = Buffer.from(compactRaw, 'base64')
-          return this.decodeBinaryContent(bytes, raw)
-        } catch { }
-      }
-
-      // 普通字符串
-      return raw
-    }
-
-    return ''
-  }
-
-  /**
-   * 解码二进制内容（处理 zstd 压缩）
-   */
-  private decodeBinaryContent(data: Buffer, fallbackValue?: string): string {
-    if (data.length === 0) return ''
-
-    try {
-      // 检查是否是 zstd 压缩数据 (magic number: 0xFD2FB528)
-      if (data.length >= 4) {
-        const magicLE = data.readUInt32LE(0)
-        const magicBE = data.readUInt32BE(0)
-        if (magicLE === 0xFD2FB528 || magicBE === 0xFD2FB528) {
-          // zstd 压缩，需要解压
-          try {
-            const decompressed = fzstd.decompress(data)
-            return Buffer.from(decompressed).toString('utf-8')
-          } catch (e) {
-            console.error('zstd 解压失败:', e)
-          }
-        }
-      }
-
-      // 尝试直接 UTF-8 解码
-      const decoded = data.toString('utf-8')
-      // 检查是否有太多替换字符
-      const replacementCount = (decoded.match(/\uFFFD/g) || []).length
-      if (replacementCount < decoded.length * 0.2) {
-        return decoded.replace(/\uFFFD/g, '')
-      }
-
-      // 如果提供了 fallbackValue，且解码结果看起来像二进制垃圾，则返回 fallbackValue
-      if (fallbackValue && replacementCount > 0) {
-        // 
-        return fallbackValue
-      }
-
-      // 尝试 latin1 解码
-      return data.toString('latin1')
-    } catch {
-      return fallbackValue || ''
-    }
-  }
-
-  /**
-   * 检查是否像 hex 编码
-   */
-  private looksLikeHex(s: string): boolean {
-    const compact = this.compactEncodedPayload(s)
-    if (compact.length % 2 !== 0) return false
-    return /^[0-9a-fA-F]+$/.test(compact)
-  }
-
-  /**
-   * 检查是否像 base64 编码
-   */
-  private looksLikeBase64(s: string): boolean {
-    const compact = this.compactEncodedPayload(s)
-    if (compact.length % 4 !== 0) return false
-    return /^[A-Za-z0-9+/=]+$/.test(compact)
-  }
-
-  private compactEncodedPayload(raw: string): string {
-    return String(raw || '').replace(/\s+/g, '').trim()
-  }
 
   private getSessionLocalType(row: Record<string, any>): number | undefined {
-    const localType = this.getRowInt(row, ['local_type', 'localType', 'WCDB_CT_local_type'], Number.NaN)
+    const localType = getRowInt(row, ['local_type', 'localType', 'WCDB_CT_local_type'], Number.NaN)
     return Number.isFinite(localType) ? Math.floor(localType) : undefined
   }
 
@@ -7133,7 +4538,7 @@ class ChatService {
       for (const row of contactResult.contacts as Record<string, any>[]) {
         const username = String(row.username || '').trim()
         if (!username) continue
-        const localType = this.getRowInt(row, ['local_type', 'localType', 'WCDB_CT_local_type'], Number.NaN)
+        const localType = getRowInt(row, ['local_type', 'localType', 'WCDB_CT_local_type'], Number.NaN)
         if (!Number.isFinite(localType)) continue
         localTypeMap.set(username, Math.floor(localType))
       }
@@ -7305,7 +4710,7 @@ class ChatService {
 
       // 获取当前用户 wxid，用于识别"自己"
       const myWxid = this.configService.getMyWxidCleaned()
-      const cleanedMyWxid = myWxid ? this.cleanAccountDirName(myWxid) : ''
+      const cleanedMyWxid = myWxid ? cleanAccountDirName(myWxid) : ''
 
       // 解析付款方名称：自己 > 群昵称 > 备注 > 昵称 > alias > wxid
       const resolveName = async (username: string): Promise<string> => {
@@ -7363,7 +4768,7 @@ class ChatService {
         return { success: false, error: '未配置微信ID' }
       }
 
-      const cleanedWxid = this.cleanAccountDirName(myWxid)
+      const cleanedWxid = cleanAccountDirName(myWxid)
       // 增加 'self' 作为兜底标识符，微信有时将个人信息存储在 'self' 记录中
       const fetchList = Array.from(new Set([myWxid, cleanedWxid, 'self']))
 
@@ -7811,7 +5216,7 @@ class ChatService {
             count: parseInt(row.count || '0', 10)
           })
 
-          const firstTs = this.getRowInt(
+          const firstTs = getRowInt(
             row,
             ['first_timestamp', 'firstTimestamp', 'first_time', 'firstTime', 'min_create_time', 'minCreateTime'],
             0
@@ -7820,7 +5225,7 @@ class ChatService {
             firstMessageTime = firstTs
           }
 
-          const lastTs = this.getRowInt(
+          const lastTs = getRowInt(
             row,
             ['last_timestamp', 'lastTimestamp', 'last_time', 'lastTime', 'max_create_time', 'maxCreateTime'],
             0
@@ -7944,8 +5349,8 @@ class ChatService {
       const allowStaleCache = options.allowStaleCache === true
       const preferAccurateSpecialTypes = options.preferAccurateSpecialTypes === true
       const cacheOnly = options.cacheOnly === true
-      const beginTimestamp = this.normalizeTimestampSeconds(Number(options.beginTimestamp || 0))
-      const endTimestamp = this.normalizeTimestampSeconds(Number(options.endTimestamp || 0))
+      const beginTimestamp = normalizeTimestampSeconds(Number(options.beginTimestamp || 0))
+      const endTimestamp = normalizeTimestampSeconds(Number(options.endTimestamp || 0))
       const useRangeFilter = beginTimestamp > 0 || endTimestamp > 0
 
       const normalizedSessionIds = Array.from(
@@ -8003,7 +5408,7 @@ class ChatService {
 
       if (pendingSessionIds.length > 0) {
         const myWxid = this.configService.getMyWxidCleaned() || ''
-        const selfIdentitySet = new Set<string>(this.buildIdentityKeys(myWxid))
+        const selfIdentitySet = new Set<string>(buildIdentityKeys(myWxid))
         let usedBatchedCompute = false
         if (pendingSessionIds.length === 1) {
           const sessionId = pendingSessionIds[0]
@@ -8121,7 +5526,7 @@ class ChatService {
         return { success: false, error: '未找到消息' }
       }
       const msg = msgResult.message
-      const rawImageInfo = msg.rawContent ? this.parseImageInfo(msg.rawContent) : {}
+      const rawImageInfo = msg.rawContent ? parseImageInfo(msg.rawContent) : {}
       const imageMd5 = msg.imageMd5 || rawImageInfo.md5
       const imageOriginSourceMd5 = msg.imageOriginSourceMd5 || rawImageInfo.originSourceMd5
       const imageDatName = msg.imageDatName
@@ -8199,7 +5604,7 @@ class ChatService {
 
       let msgCreateTime = createTime
       let senderWxid: string | null = senderWxidOpt || null
-      let resolvedServerId: string | number = this.normalizeUnsignedIntegerToken(serverId) || 0
+      let resolvedServerId: string | number = normalizeUnsignedIntegerToken(serverId) || 0
       let locatedMsg: Message | null = null
       let rejectedNonVoiceLookup = false
 
@@ -8207,7 +5612,7 @@ class ChatService {
 
       // 已提供强键(createTime + serverId)时，直接走语音定位，避免 localId 反查噪音与误导
       const hasStrongInput = Number.isFinite(Number(msgCreateTime)) && Number(msgCreateTime) > 0
-        && Boolean(this.normalizeUnsignedIntegerToken(serverId))
+        && Boolean(normalizeUnsignedIntegerToken(serverId))
 
       if (hasStrongInput) {
         lookupPath.push('调用入参已具备强键(createTime+serverId)，跳过localId反查')
@@ -8220,8 +5625,8 @@ class ChatService {
           lookupPath.push('未命中: getMessageByLocalId')
         } else {
           const dbMsg = msgResult.message as Message
-          const locatedServerId = this.normalizeUnsignedIntegerToken(dbMsg.serverIdRaw ?? dbMsg.serverId)
-          const incomingServerId = this.normalizeUnsignedIntegerToken(serverId)
+          const locatedServerId = normalizeUnsignedIntegerToken(dbMsg.serverIdRaw ?? dbMsg.serverId)
+          const incomingServerId = normalizeUnsignedIntegerToken(serverId)
           lookupPath.push(`命中消息定位: localId=${dbMsg.localId}, createTime=${dbMsg.createTime}, sender=${dbMsg.senderUsername || ''}, serverId=${locatedServerId || '0'}, localType=${dbMsg.localType}, voice时长=${dbMsg.voiceDurationSeconds ?? 0}`)
 
           if (incomingServerId && locatedServerId && incomingServerId !== locatedServerId) {
@@ -8956,7 +6361,7 @@ class ChatService {
         return { success: false, error: result.error || '查询语音消息失败' }
       }
 
-      let allVoiceMessages: Message[] = this.mapRowsToMessages(result.rows as Record<string, any>[], sessionId)
+      let allVoiceMessages: Message[] = mapRowsToMessages(result.rows as Record<string, any>[], sessionId, String(this.configService.getMyWxidCleaned() || '').trim())
 
       // 按 createTime 降序排序
       allVoiceMessages.sort((a, b) => b.createTime - a.createTime)
@@ -8999,7 +6404,7 @@ class ChatService {
         return { success: false, error: result.error || '查询图片消息失败' }
       }
 
-      const mapped = this.mapRowsToMessages(result.rows as Record<string, any>[], sessionId)
+      const mapped = mapRowsToMessages(result.rows as Record<string, any>[], sessionId, String(this.configService.getMyWxidCleaned() || '').trim())
       let allImages: Array<{ imageMd5?: string; imageOriginSourceMd5?: string; imageDatName?: string; createTime?: number }> = mapped
         .filter(msg => msg.localType === 3)
         .map(msg => ({
@@ -9125,7 +6530,7 @@ class ChatService {
           if (!result.success || !Array.isArray(result.rows) || result.rows.length === 0) continue
           if (result.rows.length >= perTypeFetch) maybeHasMore = true
 
-          const mapped = this.mapRowsToMessages(result.rows as Record<string, any>[], sessionId)
+          const mapped = mapRowsToMessages(result.rows as Record<string, any>[], sessionId, String(this.configService.getMyWxidCleaned() || '').trim())
           for (const message of mapped) {
             const resourceType = this.resolveResourceType(message)
             if (!resourceType || !typeSet.has(resourceType)) continue
@@ -9228,526 +6633,8 @@ class ChatService {
       privateLimit?: number
       mentionMode?: 'text_at_me' | string
     }
-  ): Promise<{ success: boolean; data?: MyFootprintData; error?: string }> {
-    try {
-      const connectResult = await this.ensureConnected()
-      if (!connectResult.success) {
-        return { success: false, error: connectResult.error || '数据库未连接' }
-      }
-
-      const begin = this.normalizeTimestampSeconds(beginTimestamp)
-      const end = this.normalizeTimestampSeconds(endTimestamp)
-      const normalizedEnd = begin > 0 && end > 0 && end < begin ? begin : end
-      const mentionLimitRaw = Number(options?.mentionLimit ?? 0)
-      const privateLimitRaw = Number(options?.privateLimit ?? 0)
-      const mentionLimit = Number.isFinite(mentionLimitRaw) && mentionLimitRaw >= 0
-        ? Math.floor(mentionLimitRaw)
-        : 0
-      const privateLimit = Number.isFinite(privateLimitRaw) && privateLimitRaw >= 0
-        ? Math.floor(privateLimitRaw)
-        : 0
-
-      let myWxid = String(options?.myWxid || '').trim()
-      if (!myWxid) {
-        myWxid = String(this.configService.getMyWxidCleaned() || '').trim()
-      }
-      if (!myWxid) {
-        return { success: false, error: '未识别当前账号 wxid' }
-      }
-
-      let privateSessionIds = Array.isArray(options?.privateSessionIds)
-        ? options!.privateSessionIds!.map((value) => String(value || '').trim()).filter(Boolean)
-        : []
-      let groupSessionIds = Array.isArray(options?.groupSessionIds)
-        ? options!.groupSessionIds!.map((value) => String(value || '').trim()).filter(Boolean)
-        : []
-      const privateSessionLocalTypeMap = new Map<string, number>()
-      const hasExplicitGroupScope = Array.isArray(options?.groupSessionIds)
-        && options!.groupSessionIds!.some((value) => String(value || '').trim().length > 0)
-
-      if (privateSessionIds.length === 0 && groupSessionIds.length === 0) {
-        const sessionsResult = await wcdbService.getSessions()
-        if (!sessionsResult.success || !Array.isArray(sessionsResult.sessions)) {
-          return { success: false, error: sessionsResult.error || '读取会话列表失败' }
-        }
-        const openimLocalTypeMap = await this.loadContactLocalTypeMapForEnterpriseOpenim(
-          (sessionsResult.sessions as Array<Record<string, any>>).map((session) => String(session.username || session.user_name || '').trim())
-        )
-        for (const session of sessionsResult.sessions as Array<Record<string, any>>) {
-          const sessionId = String(session.username || session.user_name || '').trim()
-          if (!sessionId) continue
-          let sessionLocalType = this.getSessionLocalType(session)
-          if (!Number.isFinite(sessionLocalType) && this.isEnterpriseOpenimUsername(sessionId)) {
-            sessionLocalType = openimLocalTypeMap.get(sessionId)
-          }
-          if (typeof sessionLocalType === 'number' && Number.isFinite(sessionLocalType)) {
-            privateSessionLocalTypeMap.set(sessionId, sessionLocalType)
-          }
-          const sessionLastTs = this.normalizeTimestampSeconds(
-            Number(session.lastTimestamp || session.sortTimestamp || 0)
-          )
-          if (sessionId.endsWith('@chatroom')) {
-            groupSessionIds.push(sessionId)
-          } else {
-            if (!this.shouldKeepSession(sessionId, sessionLocalType)) continue
-            if (begin > 0 && sessionLastTs > 0 && sessionLastTs < begin) continue
-            privateSessionIds.push(sessionId)
-          }
-        }
-      }
-
-      const unresolvedOpenimPrivateSessionIds = privateSessionIds.filter((value) =>
-        this.isEnterpriseOpenimUsername(value) && !privateSessionLocalTypeMap.has(value)
-      )
-      if (unresolvedOpenimPrivateSessionIds.length > 0) {
-        const fallbackMap = await this.loadContactLocalTypeMapForEnterpriseOpenim(unresolvedOpenimPrivateSessionIds)
-        for (const [username, localType] of fallbackMap.entries()) {
-          privateSessionLocalTypeMap.set(username, localType)
-        }
-      }
-
-      privateSessionIds = Array.from(new Set(
-        privateSessionIds
-          .map((value) => String(value || '').trim())
-          .filter((value) => value && !value.endsWith('@chatroom') && this.shouldKeepSession(value, privateSessionLocalTypeMap.get(value)))
-      ))
-      groupSessionIds = Array.from(new Set(
-        groupSessionIds
-          .map((value) => String(value || '').trim())
-          .filter((value) => value && value.endsWith('@chatroom'))
-      ))
-      if (!hasExplicitGroupScope) {
-        groupSessionIds = await this.resolveMyFootprintGroupSessionIds(groupSessionIds, begin, normalizedEnd)
-      }
-
-      privateSessionIds = await this.filterMyFootprintPrivateSessions(privateSessionIds)
-
-      let data: MyFootprintData | null = null
-      const effectivePrivateLimit = privateLimit
-      // native 候选上限：0 表示不截断候选，确保前端 source 二次过滤有完整输入
-      const nativeMentionCandidateLimit = 0
-      let nativePasses = 0
-      const candidateLimitUsed = nativeMentionCandidateLimit
-      let nativeGroupChunks = 0
-
-      const runNativePass = async (passOptions: {
-        label: string
-        passPrivateSessionIds: string[]
-        passGroupSessionIds: string[]
-        candidateLimit: number
-        passPrivateLimit: number
-      }): Promise<MyFootprintData> => {
-        nativePasses += 1
-        const nativeResult = await wcdbService.getMyFootprintStats({
-          beginTimestamp: begin,
-          endTimestamp: normalizedEnd,
-          myWxid,
-          privateSessionIds: passOptions.passPrivateSessionIds,
-          groupSessionIds: passOptions.passGroupSessionIds,
-          mentionLimit: passOptions.candidateLimit,
-          privateLimit: passOptions.passPrivateLimit,
-          mentionMode: options?.mentionMode || 'text_at_me'
-        })
-        if (!nativeResult.success || !nativeResult.data) {
-          throw new Error(nativeResult.error || '获取我的足迹统计失败')
-        }
-        const normalized = this.normalizeMyFootprintData(nativeResult.data)
-        return normalized
-      }
-
-      const runGroupPasses = async (targetGroupSessionIds: string[]): Promise<{ raw: MyFootprintData | null; chunks: number }> => {
-        if (!Array.isArray(targetGroupSessionIds) || targetGroupSessionIds.length === 0) {
-          return { raw: null, chunks: 0 }
-        }
-        const singleGroupThresholdRaw = Number(process.env.WEFLOW_MY_FOOTPRINT_SINGLE_GROUP_THRESHOLD || 40)
-        const singleGroupThreshold = Number.isFinite(singleGroupThresholdRaw) && singleGroupThresholdRaw >= 1
-          ? Math.floor(singleGroupThresholdRaw)
-          : 40
-
-        let aggregated: MyFootprintData | null = null
-        let chunks = 0
-        if (targetGroupSessionIds.length <= singleGroupThreshold) {
-          chunks = targetGroupSessionIds.length
-          for (const sessionId of targetGroupSessionIds) {
-            const chunkRaw = await runNativePass({
-              label: `group-single:${sessionId}`,
-              passPrivateSessionIds: [],
-              passGroupSessionIds: [sessionId],
-              candidateLimit: candidateLimitUsed,
-              passPrivateLimit: 0
-            })
-            aggregated = aggregated
-              ? this.mergeMyFootprintMentionResult(aggregated, chunkRaw)
-              : chunkRaw
-          }
-        } else {
-          const groupChunks = splitGroupSessionsForNative(targetGroupSessionIds)
-          chunks = groupChunks.length
-          for (const chunk of groupChunks) {
-            const chunkRaw = await runNativePass({
-              label: `group-chunk:${chunk[0] || ''}..(${chunk.length})`,
-              passPrivateSessionIds: [],
-              passGroupSessionIds: chunk,
-              candidateLimit: candidateLimitUsed,
-              passPrivateLimit: 0
-            })
-            aggregated = aggregated
-              ? this.mergeMyFootprintMentionResult(aggregated, chunkRaw)
-              : chunkRaw
-          }
-        }
-        return { raw: aggregated, chunks }
-      }
-
-      const splitGroupSessionsForNative = (sessionIds: string[]): string[][] => {
-        const normalized = Array.from(new Set(
-          (sessionIds || [])
-            .map((value) => String(value || '').trim())
-            .filter((value) => value.endsWith('@chatroom'))
-        ))
-        if (normalized.length === 0) return []
-
-        // 规避 native options_json 可能存在的固定缓冲上限：按 payload 字节安全分块。
-        const maxBytesRaw = Number(process.env.WEFLOW_MY_FOOTPRINT_GROUP_OPTIONS_MAX_BYTES || 900)
-        const maxBytes = Number.isFinite(maxBytesRaw) && maxBytesRaw >= 512
-          ? Math.floor(maxBytesRaw)
-          : 900
-        const estimateBytes = (groups: string[]): number => Buffer.byteLength(JSON.stringify({
-          begin,
-          end: normalizedEnd,
-          my_wxid: myWxid,
-          private_session_ids: [],
-          group_session_ids: groups,
-          mention_limit: candidateLimitUsed,
-          private_limit: 0,
-          mention_mode: options?.mentionMode || 'text_at_me'
-        }), 'utf8')
-
-        const chunks: string[][] = []
-        let current: string[] = []
-        for (const sessionId of normalized) {
-          if (current.length === 0) {
-            current.push(sessionId)
-            continue
-          }
-          const next = [...current, sessionId]
-          if (estimateBytes(next) > maxBytes) {
-            chunks.push(current)
-            current = [sessionId]
-          } else {
-            current = next
-          }
-        }
-        if (current.length > 0) chunks.push(current)
-        return chunks
-      }
-
-      let privateNativeRaw: MyFootprintData | null = null
-      let mentionNativeRaw: MyFootprintData | null = null
-
-      if (privateSessionIds.length > 0) {
-        privateNativeRaw = await runNativePass({
-          label: 'private',
-          passPrivateSessionIds: privateSessionIds,
-          passGroupSessionIds: [],
-          candidateLimit: 0,
-          passPrivateLimit: effectivePrivateLimit
-        })
-      }
-
-      if (groupSessionIds.length > 0) {
-        const firstPass = await runGroupPasses(groupSessionIds)
-        mentionNativeRaw = firstPass.raw
-        nativeGroupChunks = firstPass.chunks
-
-        if ((mentionNativeRaw?.mentions.length || 0) === 0) {
-          const probeIndexes = Array.from(new Set([
-            0,
-            Math.floor(groupSessionIds.length / 2),
-            groupSessionIds.length - 1
-          ])).filter((index) => index >= 0 && index < groupSessionIds.length)
-          let probeHit = false
-          for (const index of probeIndexes) {
-            const sessionId = groupSessionIds[index]
-            const probeRaw = await runNativePass({
-              label: `group-probe:${sessionId}`,
-              passPrivateSessionIds: [],
-              passGroupSessionIds: [sessionId],
-              candidateLimit: candidateLimitUsed,
-              passPrivateLimit: 0
-            })
-            if (probeRaw.mentions.length > 0 || probeRaw.summary.mention_count > 0) {
-              probeHit = true
-              break
-            }
-          }
-
-          if (probeHit) {
-            await wcdbService.getSessions().catch(() => ({ success: false }))
-            const retryPass = await runGroupPasses(groupSessionIds)
-            mentionNativeRaw = retryPass.raw
-            nativeGroupChunks = retryPass.chunks
-          }
-        }
-      }
-
-      let nativeRaw = privateNativeRaw || mentionNativeRaw || this.normalizeMyFootprintData({})
-      if (privateNativeRaw && mentionNativeRaw) {
-        nativeRaw = this.mergeMyFootprintMentionResult(privateNativeRaw, mentionNativeRaw)
-      }
-
-      data = this.filterMyFootprintMentionsBySource(nativeRaw, myWxid, mentionLimit)
-
-      if (privateSessionIds.length > 0 && data.private_segments.length === 0) {
-        const privateSegments = await this.rebuildMyFootprintPrivateSegments({
-          begin,
-          end: normalizedEnd,
-          myWxid,
-          privateSessionIds
-        })
-        if (privateSegments.length > 0) {
-          data = {
-            ...data,
-            private_segments: privateSegments
-          }
-        }
-      }
-
-      if (data.mentions.length === 0) {
-        if (this.shouldRunMyFootprintHeavyDebug()) {
-          const privatePassRawMentions = privateNativeRaw?.mentions.length || 0
-          const mentionPassRawMentions = mentionNativeRaw?.mentions.length || 0
-          console.warn(
-            `[MyFootprint][diag] zero filtered mentions begin=${begin} end=${normalizedEnd} groups=${groupSessionIds.length} raw=${nativeRaw.mentions.length} splitRaw(private=${privatePassRawMentions},group=${mentionPassRawMentions}) passes=${nativePasses} groupChunks=${nativeGroupChunks}`
-          )
-          await this.printMyFootprintNativeLogs('zero_filtered_mentions')
-          await this.logMyFootprintNativeQuickProbe({
-            begin,
-            end: normalizedEnd,
-            myWxid,
-            groupSessionIds,
-            mentionMode: options?.mentionMode || 'text_at_me'
-          })
-          await this.logMyFootprintZeroMentionDebug({
-            begin,
-            end: normalizedEnd,
-            myWxid,
-            groupSessionIds,
-            nativeData: nativeRaw
-          })
-        }
-      }
-
-      const enriched = await this.enrichMyFootprintData(data)
-      return { success: true, data: enriched }
-    } catch (error) {
-      console.error('[ChatService] 获取我的足迹统计失败:', error)
-      return { success: false, error: String(error) }
-    }
-  }
-
-  private async logMyFootprintNativeQuickProbe(params: {
-    begin: number
-    end: number
-    myWxid: string
-    groupSessionIds: string[]
-    mentionMode: string
-  }): Promise<void> {
-    try {
-      const groups = Array.from(new Set(
-        (params.groupSessionIds || [])
-          .map((value) => String(value || '').trim())
-          .filter((value) => value.endsWith('@chatroom'))
-      ))
-      if (groups.length === 0) {
-        console.warn('[MyFootprint][native-quick] skipped: no groups')
-        return
-      }
-      const indices = Array.from(new Set([
-        0,
-        Math.floor(groups.length / 2),
-        groups.length - 1
-      ])).filter((index) => index >= 0 && index < groups.length)
-
-      for (const index of indices) {
-        const sessionId = groups[index]
-        const result = await wcdbService.getMyFootprintStats({
-          beginTimestamp: params.begin,
-          endTimestamp: params.end,
-          myWxid: params.myWxid,
-          privateSessionIds: [],
-          groupSessionIds: [sessionId],
-          mentionLimit: 0,
-          privateLimit: 0,
-          mentionMode: params.mentionMode
-        })
-        if (!result.success || !result.data) {
-          console.warn(
-            `[MyFootprint][native-quick][${index + 1}/${groups.length}][${sessionId}] fail err=${result.error || 'unknown'}`
-          )
-          continue
-        }
-        const raw = this.normalizeMyFootprintData(result.data)
-        console.warn(
-          `[MyFootprint][native-quick][${index + 1}/${groups.length}][${sessionId}] mentions=${raw.mentions.length} mentionGroups=${raw.mention_groups.length} summaryMention=${raw.summary.mention_count} diagScanned=${raw.diagnostics.scanned_dbs} diagElapsed=${raw.diagnostics.elapsed_ms}`
-        )
-      }
-    } catch (error) {
-      console.warn('[MyFootprint][native-quick] exception:', error)
-    }
-  }
-
-  private async rebuildMyFootprintPrivateSegments(params: {
-    begin: number
-    end: number
-    myWxid: string
-    privateSessionIds: string[]
-  }): Promise<MyFootprintPrivateSegment[]> {
-    const sessionGapSeconds = 10 * 60
-    const segments: MyFootprintPrivateSegment[] = []
-
-    type WorkingSegment = {
-      segment_index: number
-      start_ts: number
-      end_ts: number
-      incoming_count: number
-      outgoing_count: number
-      first_incoming_ts: number
-      first_reply_ts: number
-      anchor_local_id: number
-      anchor_create_time: number
-      latest_local_id: number
-      latest_create_time: number
-    }
-
-    for (const sessionId of params.privateSessionIds) {
-      const cursorResult = await wcdbService.openMessageCursorLite(
-        sessionId,
-        360,
-        true,
-        params.begin,
-        params.end
-      )
-      if (!cursorResult.success || !cursorResult.cursor) continue
-
-      let segmentCursor = 0
-      let active: WorkingSegment | null = null
-      let lastMessageTs = 0
-      const commit = () => {
-        if (!active) return
-        const startTs = active.start_ts > 0 ? active.start_ts : active.anchor_create_time
-        const endTs = active.end_ts > 0 ? active.end_ts : startTs
-        const incoming = Math.max(0, active.incoming_count)
-        const outgoing = Math.max(0, active.outgoing_count)
-        const messageCount = incoming + outgoing
-        if (startTs > 0 && messageCount > 0) {
-          segments.push({
-            session_id: sessionId,
-            segment_index: active.segment_index,
-            start_ts: startTs,
-            end_ts: endTs,
-            duration_sec: Math.max(0, endTs - startTs),
-            incoming_count: incoming,
-            outgoing_count: outgoing,
-            message_count: messageCount,
-            replied: incoming > 0 && outgoing > 0,
-            first_incoming_ts: active.first_incoming_ts,
-            first_reply_ts: active.first_reply_ts,
-            latest_ts: endTs,
-            anchor_local_id: active.anchor_local_id,
-            anchor_create_time: startTs
-          })
-        }
-        active = null
-      }
-
-      let hasMore = true
-      try {
-        while (hasMore) {
-          const batchResult = await wcdbService.fetchMessageBatch(cursorResult.cursor)
-          if (!batchResult.success || !Array.isArray(batchResult.rows)) break
-          hasMore = Boolean(batchResult.hasMore)
-
-          for (const row of batchResult.rows as Array<Record<string, any>>) {
-            const createTime = this.toSafeInt(row.create_time, 0)
-            const localId = this.toSafeInt(row.local_id, 0)
-            const isSend = this.resolveFootprintRowIsSend(row, params.myWxid)
-
-            if (createTime > 0) {
-              const needNew = !active || (lastMessageTs > 0 && createTime - lastMessageTs > sessionGapSeconds)
-              if (needNew) {
-                commit()
-                segmentCursor += 1
-                active = {
-                  segment_index: segmentCursor,
-                  start_ts: createTime,
-                  end_ts: createTime,
-                  incoming_count: 0,
-                  outgoing_count: 0,
-                  first_incoming_ts: 0,
-                  first_reply_ts: 0,
-                  anchor_local_id: localId,
-                  anchor_create_time: createTime,
-                  latest_local_id: localId,
-                  latest_create_time: createTime
-                }
-              }
-            } else if (!active) {
-              segmentCursor += 1
-              active = {
-                segment_index: segmentCursor,
-                start_ts: 0,
-                end_ts: 0,
-                incoming_count: 0,
-                outgoing_count: 0,
-                first_incoming_ts: 0,
-                first_reply_ts: 0,
-                anchor_local_id: localId,
-                anchor_create_time: 0,
-                latest_local_id: localId,
-                latest_create_time: 0
-              }
-            }
-
-            if (isSend) {
-              if (active) {
-                active.outgoing_count += 1
-                if (
-                  createTime > 0
-                  && active.first_incoming_ts > 0
-                  && createTime >= active.first_incoming_ts
-                  && active.first_reply_ts <= 0
-                ) {
-                  active.first_reply_ts = createTime
-                }
-              }
-            } else if (active) {
-              active.incoming_count += 1
-              if (active.first_incoming_ts <= 0 || (createTime > 0 && createTime < active.first_incoming_ts)) {
-                active.first_incoming_ts = createTime
-              }
-            }
-
-            if (active && createTime > 0) {
-              active.end_ts = createTime
-              active.latest_create_time = createTime
-              active.latest_local_id = localId
-              lastMessageTs = createTime
-            }
-          }
-        }
-      } finally {
-        await wcdbService.closeMessageCursor(cursorResult.cursor).catch(() => {})
-      }
-
-      commit()
-    }
-
-    return segments.sort((a, b) => {
-      if (a.start_ts !== b.start_ts) return a.start_ts - b.start_ts
-      if (a.session_id !== b.session_id) return a.session_id.localeCompare(b.session_id)
-      return a.segment_index - b.segment_index
-    })
+  ) {
+    return this.myFootprintService.getMyFootprintStats(beginTimestamp, endTimestamp, options)
   }
 
   async exportMyFootprint(
@@ -9755,32 +6642,8 @@ class ChatService {
     endTimestamp: number,
     format: 'csv' | 'json',
     filePath: string
-  ): Promise<{ success: boolean; filePath?: string; error?: string }> {
-    try {
-      const normalizedFormat = String(format || '').toLowerCase() === 'csv' ? 'csv' : 'json'
-      const targetPath = String(filePath || '').trim()
-      if (!targetPath) {
-        return { success: false, error: '导出路径不能为空' }
-      }
-
-      const statsResult = await this.getMyFootprintStats(beginTimestamp, endTimestamp)
-      if (!statsResult.success || !statsResult.data) {
-        return { success: false, error: statsResult.error || '导出前获取统计失败' }
-      }
-
-      mkdirSync(dirname(targetPath), { recursive: true })
-      if (normalizedFormat === 'json') {
-        writeFileSync(targetPath, JSON.stringify(statsResult.data, null, 2), 'utf-8')
-      } else {
-        const csv = this.buildMyFootprintCsv(statsResult.data)
-        writeFileSync(targetPath, `\uFEFF${csv}`, 'utf-8')
-      }
-
-      return { success: true, filePath: targetPath }
-    } catch (error) {
-      console.error('[ChatService] 导出我的足迹失败:', error)
-      return { success: false, error: String(error) }
-    }
+  ) {
+    return this.myFootprintService.exportMyFootprint(beginTimestamp, endTimestamp, format, filePath)
   }
 
   async getMessageById(sessionId: string, localId: number): Promise<{ success: boolean; message?: Message; error?: string }> {
@@ -9840,1660 +6703,27 @@ class ChatService {
     }
   }
 
-  private normalizeTimestampSeconds(value: number): number {
-    const numeric = Number(value || 0)
-    if (!Number.isFinite(numeric) || numeric <= 0) return 0
-    let normalized = Math.floor(numeric)
-    while (normalized > 10000000000) {
-      normalized = Math.floor(normalized / 1000)
-    }
-    return normalized
-  }
-
-  private toSafeInt(value: unknown, fallback = 0): number {
-    const parsed = Number.parseInt(String(value ?? '').trim(), 10)
-    return Number.isFinite(parsed) ? parsed : fallback
-  }
-
-  private toSafeNumber(value: unknown, fallback = 0): number {
-    const parsed = Number(value)
-    return Number.isFinite(parsed) ? parsed : fallback
-  }
-
-  private resolveFootprintRowIsSend(row: Record<string, any>, myWxid: string): boolean {
-    const raw = row.computed_is_send ?? row.is_send
-    if (raw === 1 || raw === '1' || raw === true || raw === 'true') return true
-    if (raw === 0 || raw === '0' || raw === false || raw === 'false') return false
-    const senderUsername = String(row.sender_username || row.senderUsername || '').trim()
-    return Boolean(senderUsername && myWxid && senderUsername === myWxid)
-  }
-
-  private splitAtUserList(raw: string): string[] {
-    const tokens = String(raw || '')
-      .split(/[,\s;|]+/g)
-      .map((token) => token.trim().replace(/^@+/, '').replace(/^["']+|["']+$/g, ''))
-      .filter(Boolean)
-    return Array.from(new Set(tokens))
-  }
-
-  private containsAtSign(text: string): boolean {
-    if (!text) return false
-    return text.includes('@') || text.includes('＠')
-  }
-
-  private footprintMessageLikelyContainsAt(rawContent: unknown): boolean {
-    if (rawContent === null || rawContent === undefined) return false
-    const text = typeof rawContent === 'string' ? rawContent : String(rawContent || '')
-    return this.containsAtSign(text)
-  }
-
-  private matchesMyFootprintIdentity(rawToken: string, identitySet: Set<string>): boolean {
-    const token = String(rawToken || '').trim().replace(/^@+/, '')
-    if (!token) return false
-
-    const normalizedCandidates = new Set<string>()
-    const addCandidate = (value: string) => {
-      const normalized = String(value || '').trim().toLowerCase()
-      if (!normalized) return
-      normalizedCandidates.add(normalized)
-    }
-
-    addCandidate(token)
-    addCandidate(token.replace(/@chatroom$/i, ''))
-    addCandidate(token.replace(/@openim$/i, ''))
-
-    for (const candidate of normalizedCandidates) {
-      if (!candidate) continue
-      for (const selfId of identitySet) {
-        if (!selfId) continue
-        if (candidate === selfId) return true
-        if (candidate.startsWith(`${selfId}_`) || selfId.startsWith(`${candidate}_`)) return true
-      }
-    }
-    return false
-  }
-
-  private buildMyFootprintIdentitySet(myWxid: string): Set<string> {
-    const set = new Set<string>()
-    const add = (value: string) => {
-      const normalized = String(value || '').trim().toLowerCase()
-      if (!normalized) return
-      set.add(normalized)
-    }
-
-    const raw = String(myWxid || '').trim()
-    add(raw)
-    add(this.cleanAccountDirName(raw))
-    for (const key of this.buildIdentityKeys(raw)) {
-      add(key)
-    }
-    return set
-  }
-
-  private buildFootprintSourceCandidates(source: unknown): string[] {
-    const sourceCandidates: string[] = []
-    const seen = new Set<string>()
-    const pushCandidate = (value: unknown) => {
-      const normalized = this.cleanUtf16(String(value || '').trim())
-      if (!normalized) return
-      if (seen.has(normalized)) return
-      seen.add(normalized)
-      sourceCandidates.push(normalized)
-    }
-
-    const rawSource = typeof source === 'string'
-      ? source
-      : Buffer.isBuffer(source) || source instanceof Uint8Array
-        ? Buffer.from(source).toString('utf-8')
-        : typeof source === 'object' && source !== null && Array.isArray((source as { data?: unknown }).data)
-          ? Buffer.from((source as { data: number[] }).data).toString('utf-8')
-          : String(source || '')
-    const normalizedSource = String(rawSource || '').trim()
-    pushCandidate(normalizedSource)
-    if (normalizedSource.includes('&')) {
-      pushCandidate(this.decodeHtmlEntities(normalizedSource))
-    }
-
-    const sourceLooksEncoded = normalizedSource.length > 16
-      && (this.looksLikeHex(normalizedSource) || this.looksLikeBase64(normalizedSource))
-    if (sourceLooksEncoded) {
-      const decodedFromText = this.decodeMaybeCompressed(normalizedSource, 'footprint_source')
-      pushCandidate(decodedFromText)
-      if (decodedFromText.includes('&')) {
-        pushCandidate(this.decodeHtmlEntities(decodedFromText))
-      }
-    } else if (typeof source !== 'string') {
-      const decodedFromBinary = this.decodeMaybeCompressed(source, 'footprint_source')
-      pushCandidate(decodedFromBinary)
-      if (decodedFromBinary.includes('&')) {
-        pushCandidate(this.decodeHtmlEntities(decodedFromBinary))
-      }
-    }
-
-    return sourceCandidates
-  }
-
-  private normalizeFootprintSourceForOutput(source: unknown): string {
-    if (source === null || source === undefined) return ''
-    if (typeof source === 'string') return source.trim()
-    if (Buffer.isBuffer(source) || source instanceof Uint8Array) {
-      return this.decodeBinaryContent(Buffer.from(source), '').trim()
-    }
-    if (typeof source === 'object' && source !== null && Array.isArray((source as { data?: unknown }).data)) {
-      return this.decodeBinaryContent(Buffer.from((source as { data: number[] }).data), '').trim()
-    }
-    return String(source || '').trim()
-  }
-
-  private extractAtUserListTokensFromSource(source: unknown, prebuiltCandidates?: string[]): string[] {
-    const tokens = new Set<string>()
-    const sourceCandidates = Array.isArray(prebuiltCandidates) && prebuiltCandidates.length > 0
-      ? prebuiltCandidates
-      : this.buildFootprintSourceCandidates(source)
-    const addTokens = (values: string[]) => {
-      for (const value of values) {
-        const normalized = String(value || '').trim()
-        if (!normalized) continue
-        tokens.add(normalized)
-      }
-    }
-
-    const xmlPattern = /<atuserlist[^>]*>([\s\S]*?)<\/atuserlist>/gi
-    const cdataPattern = /<!\[CDATA\[([\s\S]*?)\]\]>/i
-    for (const candidateSource of sourceCandidates) {
-      if (!candidateSource.toLowerCase().includes('atuserlist')) continue
-
-      const trimmedCandidateSource = candidateSource.trim()
-      const maybeJson = trimmedCandidateSource.startsWith('{')
-        || trimmedCandidateSource.startsWith('[')
-        || trimmedCandidateSource.includes('"atuserlist"')
-      if (maybeJson) {
-        try {
-          const parsed = JSON.parse(candidateSource)
-          const atUserList = parsed?.atuserlist
-          if (Array.isArray(atUserList)) {
-            const values = atUserList
-              .map((item: unknown) => this.splitAtUserList(String(item || '')))
-              .flat()
-            addTokens(values)
-          }
-          if (typeof atUserList === 'string') {
-            addTokens(this.splitAtUserList(atUserList))
-          }
-        } catch {
-          // ignore JSON parse error and continue fallback parsing
-        }
-      }
-
-      const jsonMatch = candidateSource.match(/"atuserlist"\s*:\s*(\[[^\]]*\]|"[^"]*"|'[^']*'|[^,}\s]+)/i)
-      if (jsonMatch) {
-        const jsonCandidate = String(jsonMatch[1] || '').trim()
-        if (jsonCandidate.startsWith('[')) {
-          try {
-            const arr = JSON.parse(jsonCandidate)
-            if (Array.isArray(arr)) {
-              const values = arr
-                .map((item) => this.splitAtUserList(String(item || '')))
-                .flat()
-              addTokens(values)
-            }
-          } catch {
-            // ignore array parse error
-          }
-        }
-        const unquoted = jsonCandidate.replace(/^["']+|["']+$/g, '')
-        addTokens(this.splitAtUserList(unquoted))
-      }
-
-      xmlPattern.lastIndex = 0
-      let xmlMatch: RegExpExecArray | null
-      while ((xmlMatch = xmlPattern.exec(candidateSource)) !== null) {
-        let xmlValue = String(xmlMatch[1] || '')
-        const cdataMatch = xmlValue.match(cdataPattern)
-        if (cdataMatch?.[1]) {
-          xmlValue = cdataMatch[1]
-        }
-        addTokens(this.splitAtUserList(xmlValue))
-      }
-    }
-
-    return Array.from(tokens)
-  }
-
-  private sourceAtUserListContains(source: unknown, myWxid: string): boolean {
-    const selfIdentitySet = this.buildMyFootprintIdentitySet(myWxid)
-    return this.sourceAtUserListContainsWithIdentitySet(source, selfIdentitySet)
-  }
-
-  private sourceAtUserListContainsWithIdentitySet(source: unknown, selfIdentitySet: Set<string>): boolean {
-    if (selfIdentitySet.size === 0) return false
-    if (typeof source === 'string') {
-      const raw = source.trim()
-      if (!raw) return false
-      const loweredRaw = raw.toLowerCase()
-      if (loweredRaw.includes('atuserlist')) {
-        for (const identity of selfIdentitySet) {
-          if (identity && loweredRaw.includes(identity)) {
-            return true
-          }
-        }
-        const quickXmlMatch = raw.match(/<atuserlist[^>]*>([\s\S]*?)<\/atuserlist>/i)
-        if (quickXmlMatch?.[1]) {
-          const inner = quickXmlMatch[1]
-          const cdata = inner.match(/<!\[CDATA\[([\s\S]*?)\]\]>/i)?.[1] || inner
-          const quickTokens = this.splitAtUserList(cdata)
-          if (quickTokens.some((token) => this.matchesMyFootprintIdentity(token, selfIdentitySet))) {
-            return true
-          }
-        }
-      } else if (raw.length <= 16 || (!this.looksLikeHex(raw) && !this.looksLikeBase64(raw))) {
-        return false
-      }
-    }
-    const sourceCandidates = this.buildFootprintSourceCandidates(source)
-    for (const candidate of sourceCandidates) {
-      const normalized = String(candidate || '').toLowerCase()
-      if (!normalized || !normalized.includes('atuserlist')) continue
-      for (const identity of selfIdentitySet) {
-        if (identity && normalized.includes(identity)) {
-          return true
-        }
-      }
-    }
-    const tokens = this.extractAtUserListTokensFromSource(source, sourceCandidates)
-    if (tokens.length === 0) return false
-    return tokens.some((token) => this.matchesMyFootprintIdentity(token, selfIdentitySet))
-  }
-
-  private async resolveMyFootprintGroupSessionIds(
-    groupSessionIds: string[],
-    beginTimestamp = 0,
-    endTimestamp = 0
-  ): Promise<string[]> {
-    const normalized = Array.from(new Set(
-      (groupSessionIds || [])
-        .map((value) => String(value || '').trim())
-        .filter((value) => value.endsWith('@chatroom'))
-    ))
-    const begin = this.normalizeTimestampSeconds(beginTimestamp)
-    const end = this.normalizeTimestampSeconds(endTimestamp)
-    void begin
-    void end
-
-    const merged: string[] = []
-    const seen = new Set<string>()
-    const sessionLastTsMap = new Map<string, number>()
-    const hasSessionRank = new Set<string>()
-    const shouldKeepByLastTs = (sessionId: string, preferKeepUnknown: boolean): boolean => {
-      const normalizedSessionId = String(sessionId || '').trim()
-      if (!normalizedSessionId) return false
-      const lastTs = this.normalizeTimestampSeconds(sessionLastTsMap.get(normalizedSessionId) || 0)
-      const known = hasSessionRank.has(normalizedSessionId)
-      if (!known) return preferKeepUnknown || begin <= 0
-      if (begin > 0 && lastTs > 0 && lastTs < begin) return false
-      return true
-    }
-    const push = (value: string) => {
-      const normalizedValue = String(value || '').trim()
-      if (!normalizedValue || !normalizedValue.endsWith('@chatroom')) return
-      if (seen.has(normalizedValue)) return
-      seen.add(normalizedValue)
-      merged.push(normalizedValue)
-    }
-
-    try {
-      const sessionsResult = await this.getSessions()
-      if (sessionsResult.success && Array.isArray(sessionsResult.sessions)) {
-        const rankedGroups = sessionsResult.sessions
-          .map((session) => {
-            const sessionId = String(session?.username || '').trim()
-            const lastTs = this.normalizeTimestampSeconds(
-              Number(session?.lastTimestamp || session?.sortTimestamp || 0)
-            )
-            if (sessionId.endsWith('@chatroom')) {
-              hasSessionRank.add(sessionId)
-              sessionLastTsMap.set(sessionId, lastTs)
-            }
-            return { sessionId, lastTs }
-          })
-          .filter((item) => item.sessionId.endsWith('@chatroom'))
-          .filter((item) => shouldKeepByLastTs(item.sessionId, false))
-          .sort((a, b) => {
-            if (a.lastTs !== b.lastTs) return b.lastTs - a.lastTs
-            return a.sessionId.localeCompare(b.sessionId)
-          })
-        for (const item of rankedGroups) {
-          push(item.sessionId)
-        }
-      }
-    } catch {
-      // ignore session-based scope resolution failure
-    }
-
-    try {
-      const contactGroups = await this.listMyFootprintGroupSessionIdsFromContact()
-      for (const sessionId of contactGroups) {
-        if (!shouldKeepByLastTs(sessionId, false)) continue
-        push(sessionId)
-      }
-    } catch {
-      // ignore contact-based scope resolution failure
-    }
-
-    for (const sessionId of normalized) {
-      if (!shouldKeepByLastTs(sessionId, true)) continue
-      push(sessionId)
-    }
-
-    return merged.length > 0 ? merged : normalized
-  }
-
-  private async listMyFootprintGroupSessionIdsFromContact(): Promise<string[]> {
-    try {
-      const result = await wcdbService.execQuery(
-        'contact',
-        null,
-        "SELECT username FROM contact WHERE username IS NOT NULL AND username != '' AND username LIKE '%@chatroom'"
-      )
-      if (!result.success || !Array.isArray(result.rows)) {
-        return []
-      }
-
-      return Array.from(new Set(
-        (result.rows as Array<Record<string, any>>)
-          .map((row) => String(this.getRowField(row, ['username', 'user_name', 'userName']) || '').trim())
-          .filter((value) => value.endsWith('@chatroom'))
-      ))
-    } catch {
-      return []
-    }
-  }
-
-  private async filterMyFootprintPrivateSessions(privateSessionIds: string[]): Promise<string[]> {
-    const normalized = Array.from(new Set(
-      (privateSessionIds || [])
-        .map((value) => String(value || '').trim())
-        .filter((value) => value && !value.endsWith('@chatroom'))
-    ))
-    if (normalized.length === 0) return normalized
-
-    try {
-      const officialSessionIds = await this.getMyFootprintOfficialSessionIdSet(normalized)
-      if (officialSessionIds.size === 0) return normalized
-      return normalized.filter((sessionId) => !officialSessionIds.has(sessionId))
-    } catch {
-      return normalized
-    }
-  }
-
-  private async getMyFootprintOfficialSessionIdSet(privateSessionIds: string[]): Promise<Set<string>> {
-    const officialSessionIds = new Set<string>()
-    const normalized = Array.from(new Set(
-      (privateSessionIds || [])
-        .map((value) => String(value || '').trim())
-        .filter((value) => value && !value.endsWith('@chatroom'))
-    ))
-    if (normalized.length === 0) return officialSessionIds
-
-    for (const sessionId of normalized) {
-      if (sessionId.startsWith('gh_')) {
-        officialSessionIds.add(sessionId)
-      }
-    }
-
-    const chunkSize = 320
-    const buildInListSql = (values: string[]) => values
-      .map((value) => `'${this.escapeSqlString(value)}'`)
-      .join(',')
-
-    try {
-      const bizInfoTableResult = await wcdbService.execQuery(
-        'contact',
-        null,
-        "SELECT name FROM sqlite_master WHERE type='table' AND lower(name)='biz_info' LIMIT 1"
-      )
-      const bizInfoTableName = bizInfoTableResult.success && Array.isArray(bizInfoTableResult.rows)
-        ? String((bizInfoTableResult.rows[0] as Record<string, any> | undefined)?.name || '').trim()
-        : ''
-      if (bizInfoTableName) {
-        const tableSqlName = this.quoteSqlIdentifier(bizInfoTableName)
-        for (let index = 0; index < normalized.length; index += chunkSize) {
-          const batch = normalized.slice(index, index + chunkSize)
-          if (batch.length === 0) continue
-          const inListSql = buildInListSql(batch)
-          const sql = `SELECT username FROM ${tableSqlName} WHERE username IN (${inListSql})`
-          const result = await wcdbService.execQuery('contact', null, sql)
-          if (!result.success || !Array.isArray(result.rows)) continue
-          for (const row of result.rows as Array<Record<string, any>>) {
-            const username = String(this.getRowField(row, ['username', 'user_name', 'userName']) || '').trim()
-            if (username) officialSessionIds.add(username)
-          }
-        }
-      }
-    } catch {
-      // ignore biz_info lookup failure
-    }
-
-    try {
-      const tableInfo = await wcdbService.execQuery('contact', null, 'PRAGMA table_info(contact)')
-      if (tableInfo.success && Array.isArray(tableInfo.rows)) {
-        const availableColumns = new Map<string, string>()
-        for (const row of tableInfo.rows as Array<Record<string, any>>) {
-          const rawName = row.name ?? row.column_name ?? row.columnName
-          const name = String(rawName || '').trim()
-          if (!name) continue
-          availableColumns.set(name.toLowerCase(), name)
-        }
-
-        const pickColumn = (candidates: string[]): string | null => {
-          for (const candidate of candidates) {
-            const actual = availableColumns.get(candidate.toLowerCase())
-            if (actual) return actual
-          }
-          return null
-        }
-
-        const usernameColumn = pickColumn(['username', 'user_name', 'userName'])
-        const officialFlagColumns = [
-          pickColumn(['verify_flag', 'verifyFlag', 'verifyflag']),
-          pickColumn(['verify_status', 'verifyStatus']),
-          pickColumn(['verify_type', 'verifyType']),
-          pickColumn(['biz_type', 'bizType']),
-          pickColumn(['brand_flag', 'brandFlag']),
-          pickColumn(['service_type', 'serviceType'])
-        ].filter((column): column is string => Boolean(column))
-
-        if (usernameColumn && officialFlagColumns.length > 0) {
-          const selectColumns = Array.from(new Set([usernameColumn, ...officialFlagColumns]))
-          const selectSql = selectColumns.map((column) => this.quoteSqlIdentifier(column)).join(', ')
-          for (let index = 0; index < normalized.length; index += chunkSize) {
-            const batch = normalized.slice(index, index + chunkSize)
-            if (batch.length === 0) continue
-            const inListSql = buildInListSql(batch)
-            const sql = `SELECT ${selectSql} FROM contact WHERE ${this.quoteSqlIdentifier(usernameColumn)} IN (${inListSql})`
-            const result = await wcdbService.execQuery('contact', null, sql)
-            if (!result.success || !Array.isArray(result.rows)) continue
-            for (const row of result.rows as Array<Record<string, any>>) {
-              const username = String(this.getRowField(row, [usernameColumn, 'username', 'user_name', 'userName']) || '').trim()
-              if (!username) continue
-              const hasOfficialFlag = officialFlagColumns.some((column) => (
-                this.isTruthyMyFootprintOfficialFlag(this.getRowField(row, [column]))
-              ))
-              if (hasOfficialFlag) {
-                officialSessionIds.add(username)
-              }
-            }
-          }
-        }
-      }
-    } catch {
-      // ignore contact-flag lookup failure
-    }
-
-    return officialSessionIds
-  }
-
-  private isTruthyMyFootprintOfficialFlag(value: unknown): boolean {
-    if (value === null || value === undefined) return false
-    if (typeof value === 'boolean') return value
-    if (typeof value === 'number') return Number.isFinite(value) && value > 0
-
-    const normalized = String(value || '').trim().toLowerCase()
-    if (!normalized) return false
-    if (normalized === '0' || normalized === 'false' || normalized === 'null' || normalized === 'undefined') {
-      return false
-    }
-
-    const numeric = Number(normalized)
-    if (Number.isFinite(numeric)) {
-      return numeric > 0
-    }
-    return true
-  }
-
-  private normalizeMyFootprintData(raw: any): MyFootprintData {
-    const summaryRaw = raw?.summary || {}
-    const privateSessionsRaw = Array.isArray(raw?.private_sessions) ? raw.private_sessions : []
-    const privateSegmentsRaw = Array.isArray(raw?.private_segments) ? raw.private_segments : []
-    const mentionsRaw = Array.isArray(raw?.mentions) ? raw.mentions : []
-    const mentionGroupsRaw = Array.isArray(raw?.mention_groups) ? raw.mention_groups : []
-    const diagnosticsRaw = raw?.diagnostics || {}
-
-    const summary: MyFootprintSummary = {
-      private_inbound_people: this.toSafeInt(summaryRaw.private_inbound_people, 0),
-      private_replied_people: this.toSafeInt(summaryRaw.private_replied_people, 0),
-      private_outbound_people: this.toSafeInt(summaryRaw.private_outbound_people, 0),
-      private_reply_rate: this.toSafeNumber(summaryRaw.private_reply_rate, 0),
-      mention_count: this.toSafeInt(summaryRaw.mention_count, 0),
-      mention_group_count: this.toSafeInt(summaryRaw.mention_group_count, 0)
-    }
-
-    const private_sessions: MyFootprintPrivateSession[] = privateSessionsRaw.map((item: any) => ({
-      session_id: String(item?.session_id || '').trim(),
-      incoming_count: this.toSafeInt(item?.incoming_count, 0),
-      outgoing_count: this.toSafeInt(item?.outgoing_count, 0),
-      replied: Boolean(item?.replied),
-      first_incoming_ts: this.toSafeInt(item?.first_incoming_ts, 0),
-      first_reply_ts: this.toSafeInt(item?.first_reply_ts, 0),
-      latest_ts: this.toSafeInt(item?.latest_ts, 0),
-      anchor_local_id: this.toSafeInt(item?.anchor_local_id, 0),
-      anchor_create_time: this.toSafeInt(item?.anchor_create_time, 0)
-    })).filter((item: MyFootprintPrivateSession) => item.session_id)
-
-    const private_segments: MyFootprintPrivateSegment[] = privateSegmentsRaw.map((item: any) => ({
-      session_id: String(item?.session_id || '').trim(),
-      segment_index: this.toSafeInt(item?.segment_index, 0),
-      start_ts: this.toSafeInt(item?.start_ts, 0),
-      end_ts: this.toSafeInt(item?.end_ts, 0),
-      duration_sec: this.toSafeInt(item?.duration_sec, 0),
-      incoming_count: this.toSafeInt(item?.incoming_count, 0),
-      outgoing_count: this.toSafeInt(item?.outgoing_count, 0),
-      message_count: this.toSafeInt(item?.message_count, 0),
-      replied: Boolean(item?.replied),
-      first_incoming_ts: this.toSafeInt(item?.first_incoming_ts, 0),
-      first_reply_ts: this.toSafeInt(item?.first_reply_ts, 0),
-      latest_ts: this.toSafeInt(item?.latest_ts, 0),
-      anchor_local_id: this.toSafeInt(item?.anchor_local_id, 0),
-      anchor_create_time: this.toSafeInt(item?.anchor_create_time, 0),
-      displayName: String(item?.displayName || '').trim() || undefined,
-      avatarUrl: String(item?.avatarUrl || '').trim() || undefined
-    })).filter((item: MyFootprintPrivateSegment) => item.session_id && item.start_ts > 0)
-
-    const mentions: MyFootprintMentionItem[] = mentionsRaw.map((item: any) => ({
-      session_id: String(item?.session_id || '').trim(),
-      local_id: this.toSafeInt(item?.local_id, 0),
-      create_time: this.toSafeInt(item?.create_time, 0),
-      sender_username: String(item?.sender_username || '').trim(),
-      message_content: String(item?.message_content || ''),
-      source: String(item?.source || '')
-    })).filter((item: MyFootprintMentionItem) => item.session_id)
-
-    const mention_groups: MyFootprintMentionGroup[] = mentionGroupsRaw.map((item: any) => ({
-      session_id: String(item?.session_id || '').trim(),
-      count: this.toSafeInt(item?.count, 0),
-      latest_ts: this.toSafeInt(item?.latest_ts, 0)
-    })).filter((item: MyFootprintMentionGroup) => item.session_id)
-
-    const diagnostics: MyFootprintDiagnostics = {
-      truncated: Boolean(diagnosticsRaw.truncated),
-      scanned_dbs: this.toSafeInt(diagnosticsRaw.scanned_dbs, 0),
-      elapsed_ms: this.toSafeInt(diagnosticsRaw.elapsed_ms, 0),
-      mention_truncated: Boolean(diagnosticsRaw.mention_truncated),
-      private_truncated: Boolean(diagnosticsRaw.private_truncated)
-    }
-
-    return {
-      summary,
-      private_sessions,
-      private_segments,
-      mentions,
-      mention_groups,
-      diagnostics
-    }
-  }
-
-  private filterMyFootprintMentionsBySource(data: MyFootprintData, myWxid: string, mentionLimit: number): MyFootprintData {
-    const identitySet = this.buildMyFootprintIdentitySet(myWxid)
-    if (identitySet.size === 0) {
-      return {
-        ...data,
-        summary: {
-          ...data.summary,
-          mention_count: 0,
-          mention_group_count: 0
-        },
-        mentions: [],
-        mention_groups: []
-      }
-    }
-
-    const sourceMatchCache = new Map<string, boolean>()
-    const filteredMentions = data.mentions.filter((item) => {
-      const sourceKey = String(item.source || '')
-      const cachedMatched = sourceMatchCache.get(sourceKey)
-      if (cachedMatched !== undefined) return cachedMatched
-      const matched = this.sourceAtUserListContainsWithIdentitySet(item.source, identitySet)
-      if (sourceMatchCache.size < 4096) {
-        sourceMatchCache.set(sourceKey, matched)
-      }
-      return matched
-    })
-      .sort((a, b) => {
-        if (b.create_time !== a.create_time) return b.create_time - a.create_time
-        return b.local_id - a.local_id
-      })
-
-    let truncatedByFrontendLimit = false
-    if (mentionLimit > 0 && filteredMentions.length > mentionLimit) {
-      filteredMentions.length = mentionLimit
-      truncatedByFrontendLimit = true
-    }
-
-    const mentionGroupMap = new Map<string, MyFootprintMentionGroup>()
-    for (const mention of filteredMentions) {
-      const group = mentionGroupMap.get(mention.session_id) || {
-        session_id: mention.session_id,
-        count: 0,
-        latest_ts: 0
-      }
-      group.count += 1
-      if (mention.create_time > group.latest_ts) group.latest_ts = mention.create_time
-      mentionGroupMap.set(mention.session_id, group)
-    }
-
-    const filteredMentionGroups = Array.from(mentionGroupMap.values())
-      .sort((a, b) => {
-        if (b.count !== a.count) return b.count - a.count
-        if (b.latest_ts !== a.latest_ts) return b.latest_ts - a.latest_ts
-        return a.session_id.localeCompare(b.session_id)
-      })
-
-    const nextSummary: MyFootprintSummary = {
-      ...data.summary,
-      mention_count: filteredMentions.length,
-      mention_group_count: filteredMentionGroups.length
-    }
-
-    return {
-      ...data,
-      summary: nextSummary,
-      mentions: filteredMentions,
-      mention_groups: filteredMentionGroups,
-      diagnostics: {
-        ...data.diagnostics,
-        truncated: Boolean(data.diagnostics.truncated || truncatedByFrontendLimit)
-      }
-    }
-  }
-
-  private mergeMyFootprintMentionResult(base: MyFootprintData, mentionResult: MyFootprintData): MyFootprintData {
-    const mentionMap = new Map<string, MyFootprintMentionItem>()
-    const pushMention = (item: MyFootprintMentionItem) => {
-      const key = `${item.session_id}#${item.local_id}#${item.create_time}`
-      mentionMap.set(key, item)
-    }
-    for (const item of base.mentions) pushMention(item)
-    for (const item of mentionResult.mentions) pushMention(item)
-
-    const mergedMentions = Array.from(mentionMap.values())
-      .sort((a, b) => {
-        if (b.create_time !== a.create_time) return b.create_time - a.create_time
-        return b.local_id - a.local_id
-      })
-
-    const mentionGroupMetaMap = new Map<string, Pick<MyFootprintMentionGroup, 'displayName' | 'avatarUrl'>>()
-    const pushGroupMeta = (group: MyFootprintMentionGroup) => {
-      const prev = mentionGroupMetaMap.get(group.session_id) || {}
-      mentionGroupMetaMap.set(group.session_id, {
-        displayName: group.displayName || prev.displayName,
-        avatarUrl: group.avatarUrl || prev.avatarUrl
-      })
-    }
-    for (const group of base.mention_groups) pushGroupMeta(group)
-    for (const group of mentionResult.mention_groups) pushGroupMeta(group)
-
-    const mentionGroupMap = new Map<string, MyFootprintMentionGroup>()
-    for (const mention of mergedMentions) {
-      const current = mentionGroupMap.get(mention.session_id) || {
-        session_id: mention.session_id,
-        count: 0,
-        latest_ts: 0
-      }
-      current.count += 1
-      if (mention.create_time > current.latest_ts) {
-        current.latest_ts = mention.create_time
-      }
-      mentionGroupMap.set(mention.session_id, current)
-    }
-
-    const mergedMentionGroups = Array.from(mentionGroupMap.values())
-      .map((group) => {
-        const meta = mentionGroupMetaMap.get(group.session_id)
-        return {
-          ...group,
-          displayName: meta?.displayName,
-          avatarUrl: meta?.avatarUrl
-        }
-      })
-      .sort((a, b) => {
-        if (b.count !== a.count) return b.count - a.count
-        if (b.latest_ts !== a.latest_ts) return b.latest_ts - a.latest_ts
-        return a.session_id.localeCompare(b.session_id)
-      })
-
-    return {
-      ...base,
-      summary: {
-        ...base.summary,
-        mention_count: mergedMentions.length,
-        mention_group_count: mergedMentionGroups.length
-      },
-      private_segments: mentionResult.private_segments.length > 0
-        ? mentionResult.private_segments
-        : base.private_segments,
-      mentions: mergedMentions,
-      mention_groups: mergedMentionGroups,
-      diagnostics: {
-        ...base.diagnostics,
-        truncated: Boolean(base.diagnostics.truncated || mentionResult.diagnostics.truncated),
-        scanned_dbs: Math.max(base.diagnostics.scanned_dbs || 0, mentionResult.diagnostics.scanned_dbs || 0),
-        elapsed_ms: Math.max(base.diagnostics.elapsed_ms || 0, mentionResult.diagnostics.elapsed_ms || 0)
-      }
-    }
-  }
-
-  private shouldRunMyFootprintHeavyDebug(): boolean {
-    const flag = String(process.env.WEFLOW_MY_FOOTPRINT_DEBUG || '').trim().toLowerCase()
-    return flag === '1' || flag === 'true' || flag === 'yes' || flag === 'on'
-  }
-
-  private async logMyFootprintZeroMentionDebug(params: {
-    begin: number
-    end: number
-    myWxid: string
-    groupSessionIds: string[]
-    nativeData: MyFootprintData
-  }): Promise<void> {
-    try {
-      const identityKeySet = this.buildMyFootprintIdentitySet(params.myWxid)
-      const identitySet = Array.from(identityKeySet)
-      console.warn(
-        `[MyFootprint][debug] zero mentions: myWxid=${params.myWxid} identityKeys=${identitySet.join('|')} groups=${params.groupSessionIds.length} nativeMentions=${params.nativeData.mentions.length} nativeMentionGroups=${params.nativeData.mention_groups.length} scannedDbs=${params.nativeData.diagnostics.scanned_dbs}`
-      )
-
-      if (params.nativeData.mentions.length > 0) {
-        const samples = params.nativeData.mentions.slice(0, 5).map((item) => {
-          const tokens = this.extractAtUserListTokensFromSource(item.source)
-          const matched = tokens.some((token) => this.matchesMyFootprintIdentity(token, identityKeySet))
-          return {
-            sessionId: item.session_id,
-            localId: item.local_id,
-            createTime: item.create_time,
-            tokens,
-            matched
-          }
-        })
-        console.warn(`[MyFootprint][debug] native mention samples=${JSON.stringify(samples)}`)
-      }
-
-      const allGroups = params.groupSessionIds
-      console.warn(`[MyFootprint][debug] start group scan: totalGroups=${allGroups.length}`)
-      let skippedNoTableGroups = 0
-      let sqlProbeCount = 0
-      let nativeSingleProbeCount = 0
-      for (let index = 0; index < allGroups.length; index += 1) {
-        const sessionId = allGroups[index]
-        const cursorResult = await wcdbService.openMessageCursorLite(
-          sessionId,
-          120,
-          false,
-          params.begin,
-          params.end
-        )
-        if (!cursorResult.success || !cursorResult.cursor) {
-          const openCursorError = String(cursorResult.error || 'unknown')
-          if (openCursorError.includes('-3')) {
-            skippedNoTableGroups += 1
-            console.warn(`[MyFootprint][debug][${index + 1}/${allGroups.length}][${sessionId}] skipped(no message table): ${openCursorError}`)
-          } else {
-            console.warn(`[MyFootprint][debug][${index + 1}/${allGroups.length}][${sessionId}] open cursor failed: ${openCursorError}`)
-          }
-          continue
-        }
-
-        let rows = 0
-        let atContentRows = 0
-        let sourcePresentRows = 0
-        let atUserListRows = 0
-        let matchedRows = 0
-        const unmatchedSamples: Array<{
-          localId: number
-          createTime: number
-          tokens: string[]
-          sourcePreview: string
-        }> = []
-
-        let hasMore = true
-        try {
-          while (hasMore && rows < 200) {
-            const batchResult = await wcdbService.fetchMessageBatch(cursorResult.cursor)
-            if (!batchResult.success || !Array.isArray(batchResult.rows)) {
-              break
-            }
-            hasMore = Boolean(batchResult.hasMore)
-            for (const row of batchResult.rows as Array<Record<string, any>>) {
-              rows += 1
-              if (rows > 200) break
-
-              const messageContentRaw = row.message_content ?? row.messageContent ?? row.content
-              const hasAtInContent = this.footprintMessageLikelyContainsAt(messageContentRaw)
-              if (hasAtInContent) atContentRows += 1
-
-              const sourceRaw = row.source ?? row.msg_source ?? row.message_source
-              if (sourceRaw !== null && sourceRaw !== undefined && String(sourceRaw).trim().length > 0) {
-                sourcePresentRows += 1
-              }
-              if (!hasAtInContent) continue
-
-              const tokens = this.extractAtUserListTokensFromSource(sourceRaw)
-              if (tokens.length > 0) atUserListRows += 1
-              const matched = tokens.some((token) => this.matchesMyFootprintIdentity(token, identityKeySet))
-              if (matched) {
-                matchedRows += 1
-              } else if (tokens.length > 0 && unmatchedSamples.length < 3) {
-                const sourceDecoded = this.decodeMaybeCompressed(sourceRaw, 'footprint_source') || String(sourceRaw || '')
-                unmatchedSamples.push({
-                  localId: this.toSafeInt(row.local_id, 0),
-                  createTime: this.toSafeInt(row.create_time, 0),
-                  tokens,
-                  sourcePreview: sourceDecoded.replace(/\s+/g, ' ').slice(0, 260)
-                })
-              }
-            }
-          }
-        } finally {
-          await wcdbService.closeMessageCursor(cursorResult.cursor).catch(() => {})
-        }
-
-        console.warn(
-          `[MyFootprint][debug][${index + 1}/${allGroups.length}][${sessionId}] rows=${rows} atContentRows=${atContentRows} sourcePresentRows=${sourcePresentRows} atUserListRows=${atUserListRows} matchedRows=${matchedRows}`
-        )
-        if (unmatchedSamples.length > 0) {
-          console.warn(`[MyFootprint][debug][${sessionId}] unmatchedSamples=${JSON.stringify(unmatchedSamples)}`)
-        }
-
-        if ((matchedRows > 0 || atContentRows > 0 || atUserListRows > 0) && sqlProbeCount < 6) {
-          sqlProbeCount += 1
-          await this.logMyFootprintNativeSqlProbe(sessionId, params.begin, params.end)
-        }
-        if (matchedRows > 0 && nativeSingleProbeCount < 4) {
-          nativeSingleProbeCount += 1
-          await this.logMyFootprintNativeSingleGroupProbe(sessionId, params.begin, params.end, params.myWxid)
-        }
-      }
-      if (skippedNoTableGroups > 0) {
-        console.warn(`[MyFootprint][debug] skippedNoTableGroups=${skippedNoTableGroups}/${allGroups.length}`)
-      }
-    } catch (error) {
-      console.warn('[MyFootprint][debug] zero mention diagnostics failed:', error)
-    }
-  }
-
-  private async printMyFootprintNativeLogs(tag: string): Promise<void> {
-    try {
-      const logsResult = await wcdbService.getLogs()
-      if (!logsResult.success || !Array.isArray(logsResult.logs)) {
-        console.warn(`[MyFootprint][native-log][${tag}] getLogs failed: ${logsResult.error || 'unknown'}`)
-        return
-      }
-
-      const logs = logsResult.logs
-        .map((line) => String(line || '').trim())
-        .filter(Boolean)
-      const keywords = [
-        'wcdb_get_my_footprint_stats',
-        'message_db_cache_refresh',
-        'open_message_cursor',
-        'open_message_cursor_lite',
-        'cursor_init',
-        'schema mismatch',
-        'no message db',
-        'get_sessions'
-      ]
-      const related = logs.filter((line) => {
-        const lowered = line.toLowerCase()
-        return keywords.some((keyword) => lowered.includes(keyword.toLowerCase()))
-      })
-
-      console.warn(
-        `[MyFootprint][native-log][${tag}] total=${logs.length} related=${related.length}`
-      )
-      const tail = related.slice(-240)
-      for (const line of tail) {
-        console.warn(`[MyFootprint][native-log] ${line}`)
-      }
-    } catch (error) {
-      console.warn(`[MyFootprint][native-log][${tag}] exception:`, error)
-    }
-  }
-
-  private async logMyFootprintNativeSqlProbe(sessionId: string, begin: number, end: number): Promise<void> {
-    try {
-      const tables = await this.getSessionMessageTables(sessionId)
-      if (!Array.isArray(tables) || tables.length === 0) {
-        console.warn(`[MyFootprint][sql-probe][${sessionId}] no tables`)
-        return
-      }
-
-      const beginTs = this.normalizeTimestampSeconds(begin)
-      const endTs = this.normalizeTimestampSeconds(end)
-      const clauseTime = [
-        beginTs > 0 ? `"create_time" >= ${beginTs}` : '',
-        endTs > 0 ? `"create_time" <= ${endTs}` : ''
-      ].filter(Boolean).join(' AND ')
-      const whereParts: string[] = []
-      if (clauseTime) whereParts.push(clauseTime)
-      whereParts.push(`"source" IS NOT NULL`)
-      whereParts.push(`"source" != ''`)
-      whereParts.push(`(("message_content" IS NOT NULL AND "message_content" != '' AND (instr("message_content", '@') > 0 OR instr("message_content", '＠') > 0)) OR instr(lower("source"), 'atuserlist') > 0)`)
-      const whereSql = whereParts.length > 0 ? ` WHERE ${whereParts.join(' AND ')}` : ''
-
-      let total = 0
-      for (const table of tables) {
-        const tableName = String(table.tableName || '').trim()
-        const dbPath = String(table.dbPath || '').trim()
-        if (!tableName || !dbPath) continue
-        const sql = `SELECT COUNT(1) AS cnt FROM ${this.quoteSqlIdentifier(tableName)}${whereSql}`
-        const result = await wcdbService.execQuery('message', dbPath, sql)
-        if (!result.success || !Array.isArray(result.rows) || result.rows.length === 0) {
-          console.warn(`[MyFootprint][sql-probe][${sessionId}] query failed db=${dbPath} table=${tableName} err=${result.error || 'unknown'}`)
-          continue
-        }
-        const cnt = this.toSafeInt((result.rows[0] as Record<string, any>).cnt, 0)
-        total += cnt
-        if (cnt > 0) {
-          console.warn(`[MyFootprint][sql-probe][${sessionId}] db=${dbPath} table=${tableName} cnt=${cnt}`)
-        }
-      }
-      console.warn(`[MyFootprint][sql-probe][${sessionId}] total=${total}`)
-    } catch (error) {
-      console.warn(`[MyFootprint][sql-probe][${sessionId}] exception:`, error)
-    }
-  }
-
-  private async logMyFootprintNativeSingleGroupProbe(sessionId: string, begin: number, end: number, myWxid: string): Promise<void> {
-    try {
-      const probeResult = await wcdbService.getMyFootprintStats({
-        beginTimestamp: begin,
-        endTimestamp: end,
-        myWxid,
-        privateSessionIds: [],
-        groupSessionIds: [sessionId],
-        mentionLimit: 0,
-        privateLimit: 0,
-        mentionMode: 'text_at_me'
-      })
-      if (!probeResult.success || !probeResult.data) {
-        console.warn(`[MyFootprint][single-native][${sessionId}] failed err=${probeResult.error || 'unknown'}`)
-        return
-      }
-
-      const raw = this.normalizeMyFootprintData(probeResult.data)
-      const first = raw.mentions[0]
-      console.warn(
-        `[MyFootprint][single-native][${sessionId}] mentions=${raw.mentions.length} groups=${raw.mention_groups.length} truncated=${raw.diagnostics.truncated} firstLocalId=${first?.local_id || 0} firstTs=${first?.create_time || 0}`
-      )
-    } catch (error) {
-      console.warn(`[MyFootprint][single-native][${sessionId}] exception:`, error)
-    }
-  }
-
-  private async getMyFootprintStatsByCursorFallback(params: {
-    begin: number
-    end: number
-    myWxid: string
-    privateSessionIds: string[]
-    groupSessionIds: string[]
-    mentionLimit: number
-    privateLimit: number
-    skipPrivateScan?: boolean
-    mentionScanLimitPerGroup?: number
-  }): Promise<{ success: boolean; data?: MyFootprintData; error?: string }> {
-    const startedAt = Date.now()
-    let truncated = false
-
-    try {
-      const privateSessionMap = new Map<string, MyFootprintPrivateSession>()
-      type PrivateSegmentWorking = {
-        segment_index: number
-        start_ts: number
-        end_ts: number
-        incoming_count: number
-        outgoing_count: number
-        first_incoming_ts: number
-        first_reply_ts: number
-        anchor_local_id: number
-        anchor_create_time: number
-        latest_local_id: number
-        latest_create_time: number
-      }
-      const privateSegments: MyFootprintPrivateSegment[] = []
-      const mentionGroupsMap = new Map<string, MyFootprintMentionGroup>()
-      const mentions: MyFootprintMentionItem[] = []
-      const mentionIdentitySet = this.buildMyFootprintIdentitySet(params.myWxid)
-      const mentionSourceMatchCache = new Map<string, boolean>()
-      const mentionScanLimit = Number.isFinite(params.mentionScanLimitPerGroup as number)
-        ? Math.max(60, Math.floor(Number(params.mentionScanLimitPerGroup)))
-        : Math.max(params.mentionLimit * 12, 4000)
-      const privateScanLimitPerSession = Math.max(
-        120,
-        Math.min(
-          600,
-          Math.floor((params.privateLimit * 2) / Math.max(params.privateSessionIds.length || 1, 1))
-        )
-      )
-      const privateBatchSize = Math.min(200, privateScanLimitPerSession)
-      const privateSessionGapSeconds = 10 * 60
-      const mentionBatchSize = 360
-      const skipPrivateScan = params.skipPrivateScan === true
-
-      if (!skipPrivateScan) for (const sessionId of params.privateSessionIds) {
-        const cursorResult = await wcdbService.openMessageCursorLite(
-          sessionId,
-          privateBatchSize,
-          true,
-          params.begin,
-          params.end
-        )
-        if (!cursorResult.success || !cursorResult.cursor) continue
-
-        const stat: MyFootprintPrivateSession = {
-          session_id: sessionId,
-          incoming_count: 0,
-          outgoing_count: 0,
-          replied: false,
-          first_incoming_ts: 0,
-          first_reply_ts: 0,
-          latest_ts: 0,
-          anchor_local_id: 0,
-          anchor_create_time: 0
-        }
-        let segmentCursor = 0
-        let activeSegment: PrivateSegmentWorking | null = null
-        let lastSegmentMessageTs = 0
-        const commitActiveSegment = () => {
-          if (!activeSegment) return
-
-          const normalizedStart = activeSegment.start_ts > 0 ? activeSegment.start_ts : activeSegment.anchor_create_time
-          const normalizedEnd = activeSegment.end_ts > 0 ? activeSegment.end_ts : normalizedStart
-          const incomingCount = Math.max(0, activeSegment.incoming_count)
-          const outgoingCount = Math.max(0, activeSegment.outgoing_count)
-          const messageCount = incomingCount + outgoingCount
-          if (normalizedStart > 0 && messageCount > 0) {
-            privateSegments.push({
-              session_id: sessionId,
-              segment_index: activeSegment.segment_index,
-              start_ts: normalizedStart,
-              end_ts: normalizedEnd,
-              duration_sec: Math.max(0, normalizedEnd - normalizedStart),
-              incoming_count: incomingCount,
-              outgoing_count: outgoingCount,
-              message_count: messageCount,
-              replied: incomingCount > 0 && outgoingCount > 0,
-              first_incoming_ts: activeSegment.first_incoming_ts,
-              first_reply_ts: activeSegment.first_reply_ts,
-              latest_ts: normalizedEnd,
-              anchor_local_id: activeSegment.anchor_local_id,
-              anchor_create_time: normalizedStart
-            })
-          }
-          activeSegment = null
-        }
-
-        let processed = 0
-        let hasMore = true
-        try {
-          while (hasMore) {
-            const batchResult = await wcdbService.fetchMessageBatch(cursorResult.cursor)
-            if (!batchResult.success || !Array.isArray(batchResult.rows)) {
-              break
-            }
-            hasMore = Boolean(batchResult.hasMore)
-            for (const row of batchResult.rows as Array<Record<string, any>>) {
-              if (processed >= privateScanLimitPerSession) {
-                if (hasMore || batchResult.rows.length > 0) truncated = true
-                hasMore = false
-                break
-              }
-              processed += 1
-
-              const createTime = this.toSafeInt(row.create_time, 0)
-              const localId = this.toSafeInt(row.local_id, 0)
-              const isSend = this.resolveFootprintRowIsSend(row, params.myWxid)
-
-              if (createTime > 0) {
-                const startNewSegment = !activeSegment
-                  || (lastSegmentMessageTs > 0 && createTime - lastSegmentMessageTs > privateSessionGapSeconds)
-                if (startNewSegment) {
-                  commitActiveSegment()
-                  segmentCursor += 1
-                  activeSegment = {
-                    segment_index: segmentCursor,
-                    start_ts: createTime,
-                    end_ts: createTime,
-                    incoming_count: 0,
-                    outgoing_count: 0,
-                    first_incoming_ts: 0,
-                    first_reply_ts: 0,
-                    anchor_local_id: localId,
-                    anchor_create_time: createTime,
-                    latest_local_id: localId,
-                    latest_create_time: createTime
-                  }
-                }
-              } else if (!activeSegment) {
-                segmentCursor += 1
-                activeSegment = {
-                  segment_index: segmentCursor,
-                  start_ts: 0,
-                  end_ts: 0,
-                  incoming_count: 0,
-                  outgoing_count: 0,
-                  first_incoming_ts: 0,
-                  first_reply_ts: 0,
-                  anchor_local_id: localId,
-                  anchor_create_time: 0,
-                  latest_local_id: localId,
-                  latest_create_time: 0
-                }
-              }
-
-              if (isSend) {
-                stat.outgoing_count += 1
-                if (
-                  createTime > 0
-                  && stat.first_incoming_ts > 0
-                  && createTime >= stat.first_incoming_ts
-                  && stat.first_reply_ts <= 0
-                ) {
-                  stat.first_reply_ts = createTime
-                }
-                if (activeSegment) {
-                  activeSegment.outgoing_count += 1
-                  if (
-                    createTime > 0
-                    && activeSegment.first_incoming_ts > 0
-                    && createTime >= activeSegment.first_incoming_ts
-                    && activeSegment.first_reply_ts <= 0
-                  ) {
-                    activeSegment.first_reply_ts = createTime
-                  }
-                }
-              } else {
-                stat.incoming_count += 1
-                if (stat.first_incoming_ts <= 0 || (createTime > 0 && createTime < stat.first_incoming_ts)) {
-                  stat.first_incoming_ts = createTime
-                }
-                if (activeSegment) {
-                  activeSegment.incoming_count += 1
-                  if (activeSegment.first_incoming_ts <= 0 || (createTime > 0 && createTime < activeSegment.first_incoming_ts)) {
-                    activeSegment.first_incoming_ts = createTime
-                  }
-                }
-              }
-
-              if (stat.latest_ts <= 0 || createTime > stat.latest_ts || (createTime === stat.latest_ts && localId > stat.anchor_local_id)) {
-                stat.latest_ts = createTime
-                stat.anchor_local_id = localId
-                stat.anchor_create_time = createTime
-              }
-
-              if (activeSegment && createTime > 0) {
-                activeSegment.end_ts = createTime
-                activeSegment.latest_create_time = createTime
-                activeSegment.latest_local_id = localId
-                lastSegmentMessageTs = createTime
-              }
-            }
-          }
-          if (hasMore) truncated = true
-        } finally {
-          await wcdbService.closeMessageCursor(cursorResult.cursor).catch(() => {})
-        }
-        commitActiveSegment()
-        stat.replied = stat.incoming_count > 0 && stat.outgoing_count > 0
-
-        if (stat.incoming_count > 0 || stat.outgoing_count > 0 || stat.latest_ts > 0) {
-          privateSessionMap.set(sessionId, stat)
-        }
-      }
-
-      for (const sessionId of params.groupSessionIds) {
-        if (mentions.length >= params.mentionLimit) {
-          truncated = true
-          break
-        }
-        const cursorResult = await wcdbService.openMessageCursorLite(
-          sessionId,
-          mentionBatchSize,
-          false,
-          params.begin,
-          params.end
-        )
-        if (!cursorResult.success || !cursorResult.cursor) continue
-
-        let scanned = 0
-        let hasMore = true
-        try {
-          while (hasMore && scanned < mentionScanLimit) {
-            const batchResult = await wcdbService.fetchMessageBatch(cursorResult.cursor)
-            if (!batchResult.success || !Array.isArray(batchResult.rows)) {
-              break
-            }
-            hasMore = Boolean(batchResult.hasMore)
-            for (const row of batchResult.rows as Array<Record<string, any>>) {
-              if (mentions.length >= params.mentionLimit) {
-                truncated = true
-                hasMore = false
-                break
-              }
-              scanned += 1
-              const messageContentRaw = row.message_content ?? row.messageContent ?? row.content
-              if (!this.footprintMessageLikelyContainsAt(messageContentRaw)) continue
-              const sourceRaw = row.source ?? row.msg_source ?? row.message_source
-              let sourceMatched = false
-              if (typeof sourceRaw === 'string') {
-                const sourceKey = sourceRaw
-                const cachedMatched = mentionSourceMatchCache.get(sourceKey)
-                if (cachedMatched !== undefined) {
-                  sourceMatched = cachedMatched
-                } else {
-                  sourceMatched = this.sourceAtUserListContainsWithIdentitySet(sourceRaw, mentionIdentitySet)
-                  if (mentionSourceMatchCache.size < 8192) {
-                    mentionSourceMatchCache.set(sourceKey, sourceMatched)
-                  }
-                }
-              } else {
-                sourceMatched = this.sourceAtUserListContainsWithIdentitySet(sourceRaw, mentionIdentitySet)
-              }
-              if (!sourceMatched) continue
-              const normalizedSource = this.normalizeFootprintSourceForOutput(sourceRaw)
-
-              let senderUsername = String(row.sender_username || row.senderUsername || '').trim()
-              if (!senderUsername && row._db_path && row.real_sender_id) {
-                senderUsername = await this.resolveMessageSenderUsernameById(
-                  String(row._db_path),
-                  row.real_sender_id
-                ) || ''
-              }
-
-              const mention: MyFootprintMentionItem = {
-                session_id: sessionId,
-                local_id: this.toSafeInt(row.local_id, 0),
-                create_time: this.toSafeInt(row.create_time, 0),
-                sender_username: senderUsername,
-                message_content: String(row.message_content || row.messageContent || ''),
-                source: normalizedSource
-              }
-              mentions.push(mention)
-
-              const group = mentionGroupsMap.get(sessionId) || {
-                session_id: sessionId,
-                count: 0,
-                latest_ts: 0
-              }
-              group.count += 1
-              if (mention.create_time > group.latest_ts) group.latest_ts = mention.create_time
-              mentionGroupsMap.set(sessionId, group)
-            }
-          }
-          if (hasMore || scanned >= mentionScanLimit) {
-            truncated = true
-          }
-        } finally {
-          await wcdbService.closeMessageCursor(cursorResult.cursor).catch(() => {})
-        }
-      }
-
-      mentions.sort((a, b) => {
-        if (b.create_time !== a.create_time) return b.create_time - a.create_time
-        return b.local_id - a.local_id
-      })
-      if (mentions.length > params.mentionLimit) {
-        mentions.length = params.mentionLimit
-        truncated = true
-      }
-
-      const private_sessions = Array.from(privateSessionMap.values())
-        .sort((a, b) => {
-          if (b.latest_ts !== a.latest_ts) return b.latest_ts - a.latest_ts
-          return a.session_id.localeCompare(b.session_id)
-        })
-      const private_segments = [...privateSegments]
-        .sort((a, b) => {
-          if (a.start_ts !== b.start_ts) return a.start_ts - b.start_ts
-          if (a.session_id !== b.session_id) return a.session_id.localeCompare(b.session_id)
-          return a.segment_index - b.segment_index
-        })
-      const mention_groups = Array.from(mentionGroupsMap.values())
-        .sort((a, b) => {
-          if (b.count !== a.count) return b.count - a.count
-          if (b.latest_ts !== a.latest_ts) return b.latest_ts - a.latest_ts
-          return a.session_id.localeCompare(b.session_id)
-        })
-
-      const private_inbound_people = private_sessions.filter((item) => item.incoming_count > 0).length
-      const private_replied_people = private_sessions.filter((item) => item.replied).length
-      const private_outbound_people = private_sessions.filter((item) => item.outgoing_count > 0).length
-      const mention_count = mention_groups.reduce((sum, item) => sum + item.count, 0)
-      const mention_group_count = mention_groups.length
-
-      const summary: MyFootprintSummary = {
-        private_inbound_people,
-        private_replied_people,
-        private_outbound_people,
-        private_reply_rate: private_inbound_people > 0 ? private_replied_people / private_inbound_people : 0,
-        mention_count,
-        mention_group_count
-      }
-
-      const diagnostics: MyFootprintDiagnostics = {
-        truncated,
-        scanned_dbs: 0,
-        elapsed_ms: Math.max(0, Date.now() - startedAt)
-      }
-
-      return {
-        success: true,
-        data: {
-          summary,
-          private_sessions,
-          private_segments,
-          mentions,
-          mention_groups,
-          diagnostics
-        }
-      }
-    } catch (error) {
-      return { success: false, error: String(error) }
-    }
-  }
-
-  private async enrichMyFootprintData(data: MyFootprintData): Promise<MyFootprintData> {
-    try {
-      const sessionIds = Array.from(new Set([
-        ...data.private_sessions.map((item) => item.session_id),
-        ...data.private_segments.map((item) => item.session_id),
-        ...data.mention_groups.map((item) => item.session_id),
-        ...data.mentions.map((item) => item.session_id)
-      ].filter(Boolean)))
-      const senderUsernames = Array.from(new Set(
-        data.mentions
-          .map((item) => item.sender_username)
-          .filter((value) => String(value || '').trim())
-      ))
-
-      const usernames = Array.from(new Set([...sessionIds, ...senderUsernames]))
-      if (usernames.length === 0) return data
-
-      const enrichResult = await this.enrichSessionsContactInfo(usernames)
-      if (!enrichResult.success || !enrichResult.contacts) return data
-      const contacts = enrichResult.contacts
-
-      const nextPrivateSessions = data.private_sessions.map((item) => {
-        const contact = contacts[item.session_id]
-        return {
-          ...item,
-          displayName: contact?.displayName || item.displayName,
-          avatarUrl: contact?.avatarUrl || item.avatarUrl
-        }
-      })
-      const nextPrivateSegments = data.private_segments.map((item) => {
-        const contact = contacts[item.session_id]
-        return {
-          ...item,
-          displayName: contact?.displayName || item.displayName,
-          avatarUrl: contact?.avatarUrl || item.avatarUrl
-        }
-      })
-
-      const nextMentionGroups = data.mention_groups.map((item) => {
-        const contact = contacts[item.session_id]
-        return {
-          ...item,
-          displayName: contact?.displayName || item.displayName,
-          avatarUrl: contact?.avatarUrl || item.avatarUrl
-        }
-      })
-
-      const nextMentions = await Promise.all(data.mentions.map(async (item) => {
-        const sessionContact = contacts[item.session_id]
-        const senderContact = item.sender_username ? contacts[item.sender_username] : undefined
-
-        let normalizedContent = this.normalizeMyFootprintMentionContent(item.message_content)
-        if (this.isLikelyUnreadableFootprintContent(normalizedContent) && item.session_id && item.local_id > 0) {
-          const detailResult = await this.getMessageById(item.session_id, item.local_id)
-          if (detailResult.success && detailResult.message) {
-            const detailMessage = detailResult.message
-            const detailRaw = String(
-              detailMessage.rawContent
-              || detailMessage.content
-              || detailMessage.parsedContent
-              || ''
-            )
-            const resolvedFromDetail = this.normalizeMyFootprintMentionContent(detailRaw)
-            if (resolvedFromDetail && !this.isLikelyUnreadableFootprintContent(resolvedFromDetail)) {
-              normalizedContent = resolvedFromDetail
-            } else {
-              const parsedFallback = String(detailMessage.parsedContent || '').trim()
-              if (parsedFallback && !this.isLikelyUnreadableFootprintContent(parsedFallback)) {
-                normalizedContent = parsedFallback
-              }
-            }
-          }
-        }
-
-        return {
-          ...item,
-          message_content: normalizedContent,
-          sessionDisplayName: sessionContact?.displayName || item.sessionDisplayName,
-          senderDisplayName: senderContact?.displayName || item.senderDisplayName || item.sender_username,
-          senderAvatarUrl: senderContact?.avatarUrl || item.senderAvatarUrl
-        }
-      }))
-
-      return {
-        ...data,
-        private_sessions: nextPrivateSessions,
-        private_segments: nextPrivateSegments,
-        mention_groups: nextMentionGroups,
-        mentions: nextMentions
-      }
-    } catch (error) {
-      console.error('[ChatService] 补充我的足迹展示信息失败:', error)
-      return data
-    }
-  }
-
-  private normalizeMyFootprintMentionContent(rawContent: unknown): string {
-    const decodedRaw = this.decodeMaybeCompressed(rawContent, 'footprint_message_content')
-    let content = String(decodedRaw || rawContent || '')
-    if (!content) return ''
-
-    content = this.cleanUtf16(this.decodeHtmlEntities(content)).trim()
-    if (!content) return ''
-
-    const looksLikeXml = content.includes('<appmsg')
-      || content.includes('&lt;appmsg')
-      || content.includes('<msg')
-      || content.includes('&lt;msg')
-
-    if (looksLikeXml) {
-      const xml = this.decodeHtmlEntities(content)
-      const type49Info = this.parseType49Message(xml)
-
-      if (type49Info.appMsgKind === 'quote') {
-        const title = this.stripSenderPrefix(this.extractXmlValue(xml, 'title'))
-        const quotedSender = String(type49Info.quotedSender || '').trim()
-        const quotedContent = this.sanitizeQuotedContent(String(type49Info.quotedContent || '').trim())
-        if (title) {
-          if (quotedContent) {
-            return `${title}\n\n引用：${quotedSender ? `${quotedSender}：` : ''}${quotedContent}`
-          }
-          return title
-        }
-        if (quotedContent) {
-          return quotedSender ? `${quotedSender}：${quotedContent}` : quotedContent
-        }
-      }
-
-      const parsed = this.parseMessageContent(xml, 49)
-      const normalizedParsed = this.stripSenderPrefix(String(parsed || '').trim())
-      if (normalizedParsed && normalizedParsed !== '[链接]' && normalizedParsed !== '[消息]') {
-        return normalizedParsed
-      }
-
-      const xmlTitle = this.stripSenderPrefix(this.extractXmlValue(xml, 'title'))
-      if (xmlTitle) return xmlTitle
-    }
-
-    return this.stripSenderPrefix(content)
-  }
-
-  private isLikelyUnreadableFootprintContent(content: string): boolean {
-    const text = String(content || '').trim()
-    if (!text) return false
-    const compact = this.compactEncodedPayload(text)
-    if (compact.length <= 80) return false
-    if (this.looksLikeHex(compact)) return true
-    if (this.looksLikeBase64(compact) && !compact.includes('<') && !compact.includes('>')) return true
-    return false
-  }
-
-  private formatFootprintTime(timestamp: number): string {
-    if (!Number.isFinite(timestamp) || timestamp <= 0) return ''
-    const date = new Date(timestamp * 1000)
-    const y = date.getFullYear()
-    const m = `${date.getMonth() + 1}`.padStart(2, '0')
-    const d = `${date.getDate()}`.padStart(2, '0')
-    const hh = `${date.getHours()}`.padStart(2, '0')
-    const mm = `${date.getMinutes()}`.padStart(2, '0')
-    const ss = `${date.getSeconds()}`.padStart(2, '0')
-    return `${y}-${m}-${d} ${hh}:${mm}:${ss}`
-  }
-
-  private escapeCsvCell(value: unknown): string {
-    const text = String(value ?? '')
-    if (!text) return ''
-    if (!/[",\n\r]/.test(text)) return text
-    return `"${text.replace(/"/g, '""')}"`
-  }
-
-  private buildMyFootprintCsv(data: MyFootprintData): string {
-    const lines: string[] = []
-    const pushRow = (...columns: unknown[]) => {
-      lines.push(columns.map((value) => this.escapeCsvCell(value)).join(','))
-    }
-
-    pushRow('模块', '指标', '数值')
-    pushRow('summary', '私聊找我人数', data.summary.private_inbound_people)
-    pushRow('summary', '我回复人数', data.summary.private_replied_people)
-    pushRow('summary', '我主动联系人数', data.summary.private_outbound_people)
-    pushRow('summary', '私聊回复率', data.summary.private_reply_rate)
-    pushRow('summary', '@我次数', data.summary.mention_count)
-    pushRow('summary', '@我群聊数', data.summary.mention_group_count)
-    pushRow('summary', '诊断:是否截断', data.diagnostics.truncated ? 'true' : 'false')
-    pushRow('summary', '诊断:扫描分库数', data.diagnostics.scanned_dbs)
-    pushRow('summary', '诊断:耗时ms', data.diagnostics.elapsed_ms)
-
-    lines.push('')
-    pushRow('private_sessions', 'session_id', 'display_name', 'incoming_count', 'outgoing_count', 'replied', 'first_incoming_ts', 'first_reply_ts', 'latest_ts', 'anchor_local_id', 'anchor_create_time')
-    for (const row of data.private_sessions) {
-      pushRow(
-        'private_sessions',
-        row.session_id,
-        row.displayName || '',
-        row.incoming_count,
-        row.outgoing_count,
-        row.replied ? 'true' : 'false',
-        this.formatFootprintTime(row.first_incoming_ts),
-        this.formatFootprintTime(row.first_reply_ts),
-        this.formatFootprintTime(row.latest_ts),
-        row.anchor_local_id,
-        row.anchor_create_time
-      )
-    }
-
-    lines.push('')
-    pushRow(
-      'private_segments',
-      'session_id',
-      'display_name',
-      'segment_index',
-      'start_ts',
-      'end_ts',
-      'duration_sec',
-      'incoming_count',
-      'outgoing_count',
-      'message_count',
-      'replied',
-      'first_incoming_ts',
-      'first_reply_ts',
-      'latest_ts',
-      'anchor_local_id',
-      'anchor_create_time'
-    )
-    for (const row of data.private_segments) {
-      pushRow(
-        'private_segments',
-        row.session_id,
-        row.displayName || '',
-        row.segment_index,
-        this.formatFootprintTime(row.start_ts),
-        this.formatFootprintTime(row.end_ts),
-        row.duration_sec,
-        row.incoming_count,
-        row.outgoing_count,
-        row.message_count,
-        row.replied ? 'true' : 'false',
-        this.formatFootprintTime(row.first_incoming_ts),
-        this.formatFootprintTime(row.first_reply_ts),
-        this.formatFootprintTime(row.latest_ts),
-        row.anchor_local_id,
-        row.anchor_create_time
-      )
-    }
-
-    lines.push('')
-    pushRow('mentions', 'session_id', 'session_display_name', 'local_id', 'create_time', 'sender_username', 'sender_display_name', 'message_content', 'source')
-    for (const row of data.mentions) {
-      pushRow(
-        'mentions',
-        row.session_id,
-        row.sessionDisplayName || '',
-        row.local_id,
-        this.formatFootprintTime(row.create_time),
-        row.sender_username,
-        row.senderDisplayName || '',
-        row.message_content,
-        row.source
-      )
-    }
-
-    lines.push('')
-    pushRow('mention_groups', 'session_id', 'display_name', 'count', 'latest_ts')
-    for (const row of data.mention_groups) {
-      pushRow(
-        'mention_groups',
-        row.session_id,
-        row.displayName || '',
-        row.count,
-        this.formatFootprintTime(row.latest_ts)
-      )
-    }
-
-    return lines.join('\n')
-  }
 
   private async parseMessage(row: any, options?: { source?: 'search' | 'detail'; sessionId?: string }): Promise<Message> {
-    const sourceInfo = this.getMessageSourceInfo(row)
-    const rawContent = this.decodeMessageContent(
+    const sourceInfo = getMessageSourceInfo(row)
+    const rawContent = decodeMessageContent(
       row.message_content,
       row.compress_content
     )
     // 这里复用 parseMessagesBatch 里面的解析逻辑，为了简单我这里先写个基础的
     // 实际项目中建议抽取 parseRawMessage(row) 供多处使用
-    const localId = this.getRowInt(row, ['local_id'], 0)
-    const serverIdRaw = this.normalizeUnsignedIntegerToken(row.server_id)
-    const serverId = this.getRowInt(row, ['server_id'], 0)
-    const localType = this.getRowInt(row, ['local_type'], 0)
-    const createTime = this.getRowTimestampSeconds(row, ['create_time', 'createTime', 'msg_time', 'msgTime', 'time'], 0)
-    const sortSeq = this.getRowInt(row, ['sort_seq'], createTime > 0 ? createTime * 1000 : 0)
+    const localId = getRowInt(row, ['local_id'], 0)
+    const serverIdRaw = normalizeUnsignedIntegerToken(row.server_id)
+    const serverId = getRowInt(row, ['server_id'], 0)
+    const localType = getRowInt(row, ['local_type'], 0)
+    const createTime = getRowTimestampSeconds(row, ['create_time', 'createTime', 'msg_time', 'msgTime', 'time'], 0)
+    const sortSeq = getRowInt(row, ['sort_seq'], createTime > 0 ? createTime * 1000 : 0)
     const rawIsSend = row.computed_is_send ?? row.is_send
     const senderUsername = await this.resolveSenderUsernameForMessageRow(row, rawContent)
-    const sendState = this.resolveMessageIsSend(rawIsSend === null ? null : parseInt(rawIsSend, 10), senderUsername)
+    const myWxid = String(this.configService.getMyWxidCleaned() || '').trim()
+    const sendState = resolveMessageIsSend(rawIsSend === null ? null : parseInt(rawIsSend, 10), senderUsername, myWxid)
     const msg: Message = {
-      messageKey: this.buildMessageKey({
+      messageKey: buildMessageKey({
         localId,
         serverId,
         createTime,
@@ -11512,7 +6742,7 @@ class ChatService {
       senderUsername,
       rawContent: rawContent,
       content: rawContent,  // 添加原始内容供视频MD5解析使用
-      parsedContent: this.parseMessageContent(rawContent, localType),
+      parsedContent: parseMessageContent(rawContent, localType),
       _db_path: sourceInfo.dbPath
     }
 
@@ -11531,31 +6761,31 @@ class ChatService {
 
     // 图片/语音解析逻辑 (简化示例，实际应调用现有解析方法)
     if (msg.localType === 3) { // Image
-      const imgInfo = this.parseImageInfo(rawContent)
+      const imgInfo = parseImageInfo(rawContent)
       msg.imageMd5 = imgInfo.md5
       msg.imageOriginSourceMd5 = imgInfo.originSourceMd5
       msg.aesKey = imgInfo.aesKey
       msg.encrypVer = imgInfo.encrypVer
       msg.cdnThumbUrl = imgInfo.cdnThumbUrl
-      msg.imageDatName = this.parseImageDatNameFromRow(row)
+      msg.imageDatName = parseImageDatNameFromRow(row)
     } else if (msg.localType === 43) { // Video
-      msg.videoMd5 = this.parseVideoFileNameFromRow(row, rawContent)
+      msg.videoMd5 = parseVideoFileNameFromRow(row, rawContent)
     } else if (msg.localType === 47) { // Emoji
-      const emojiInfo = this.parseEmojiInfo(rawContent)
+      const emojiInfo = parseEmojiInfo(rawContent)
       msg.emojiCdnUrl = emojiInfo.cdnUrl
       msg.emojiMd5 = emojiInfo.md5
       msg.emojiThumbUrl = emojiInfo.thumbUrl
       msg.emojiEncryptUrl = emojiInfo.encryptUrl
       msg.emojiAesKey = emojiInfo.aesKey
     } else if (msg.localType === 42) {
-      const cardInfo = this.parseCardInfo(rawContent)
+      const cardInfo = parseCardInfo(rawContent)
       msg.cardUsername = cardInfo.username
       msg.cardNickname = cardInfo.nickname
       msg.cardAvatarUrl = cardInfo.avatarUrl
     }
 
     if (rawContent && (rawContent.includes('<appmsg') || rawContent.includes('&lt;appmsg'))) {
-      Object.assign(msg, this.parseType49Message(rawContent))
+      Object.assign(msg, parseType49Message(rawContent))
     }
 
     return msg

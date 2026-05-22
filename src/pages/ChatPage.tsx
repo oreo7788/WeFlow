@@ -16,7 +16,9 @@ import JumpToDatePopover from '../components/JumpToDatePopover'
 import { ContactSnsTimelineDialog } from '../components/Sns/ContactSnsTimelineDialog'
 import { type ContactSnsTimelineTarget, isSingleContactSession } from '../components/Sns/contactSnsTimeline'
 import * as configService from '../services/config'
-import BizPage, { BizAccountList, BizMessageArea, BizAccount } from './BizPage'
+import { BizAccountList } from './Biz/BizAccountList'
+import { BizMessageArea } from './Biz/BizMessageArea'
+import type { BizAccount } from './Biz/types'
 import {
   finishBackgroundTask,
   isBackgroundTaskCancelRequested,

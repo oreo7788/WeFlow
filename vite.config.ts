@@ -133,7 +133,7 @@ export default defineConfig({
               ],
               output: {
                 entryFileNames: 'annualReportWorker.js',
-                inlineDynamicImports: true
+                codeSplitting: false
               }
             }
           }
@@ -152,7 +152,7 @@ export default defineConfig({
               ],
               output: {
                 entryFileNames: 'dualReportWorker.js',
-                inlineDynamicImports: true
+                codeSplitting: false
               }
             }
           }
@@ -167,7 +167,7 @@ export default defineConfig({
             rollupOptions: {
               output: {
                 entryFileNames: 'imageSearchWorker.js',
-                inlineDynamicImports: true
+                codeSplitting: false
               }
             }
           }
@@ -187,7 +187,7 @@ export default defineConfig({
               ],
               output: {
                 entryFileNames: 'wcdbWorker.js',
-                inlineDynamicImports: true
+                codeSplitting: false
               }
             }
           }
@@ -205,7 +205,7 @@ export default defineConfig({
               ],
               output: {
                 entryFileNames: 'transcribeWorker.js',
-                inlineDynamicImports: true
+                codeSplitting: false
               }
             }
           }
@@ -228,7 +228,7 @@ export default defineConfig({
               ],
               output: {
                 entryFileNames: 'exportWorker.js',
-                inlineDynamicImports: true
+                codeSplitting: false
               }
             }
           }
