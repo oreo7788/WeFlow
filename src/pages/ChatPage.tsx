@@ -575,6 +575,7 @@ interface XmlField {
 
 interface BatchImageDecryptCandidate {
   imageMd5?: string
+  imageOriginSourceMd5?: string
   imageDatName?: string
   createTime?: number
 }
@@ -5283,12 +5284,12 @@ function ChatPage(props: ChatPageProps) {
         const candidates = [...head, ...tail]
         const queued = preloadImageKeysRef.current
         const seen = new Set<string>()
-        const payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number }> = []
+        const payloads: Array<{ sessionId?: string; imageMd5?: string; imageOriginSourceMd5?: string; imageDatName?: string; createTime?: number }> = []
         for (const msg of candidates) {
           if (payloads.length >= maxPreload) break
           if (msg.localType !== 3) continue
           const cacheKey = msg.imageMd5 || msg.imageDatName || `local:${msg.localId}`
-          if (!msg.imageMd5 && !msg.imageDatName) continue
+          if (!msg.imageMd5 && !msg.imageOriginSourceMd5 && !msg.imageDatName) continue
           if (imageDataUrlCache.has(cacheKey)) continue
           const taskKey = `${currentSessionId}|${cacheKey}`
           if (queued.has(taskKey) || seen.has(taskKey)) continue
@@ -5297,6 +5298,7 @@ function ChatPage(props: ChatPageProps) {
           payloads.push({
             sessionId: currentSessionId,
             imageMd5: msg.imageMd5 || undefined,
+            imageOriginSourceMd5: msg.imageOriginSourceMd5 || undefined,
             imageDatName: msg.imageDatName,
             createTime: msg.createTime
           })
@@ -6452,6 +6454,12 @@ function ChatPage(props: ChatPageProps) {
       const imageMd5 = String(img.imageMd5 || '').trim().toLowerCase()
       if (imageMd5) {
         hardlinkMd5Set.add(imageMd5)
+      }
+      const imageOriginSourceMd5 = String(img.imageOriginSourceMd5 || '').trim().toLowerCase()
+      if (imageOriginSourceMd5) {
+        hardlinkMd5Set.add(imageOriginSourceMd5)
+      }
+      if (imageMd5 || imageOriginSourceMd5) {
         continue
       }
       const imageDatName = String(img.imageDatName || '').trim().toLowerCase()
@@ -6490,6 +6498,7 @@ function ChatPage(props: ChatPageProps) {
         const r = await window.electronAPI.image.decrypt({
           sessionId: session.username,
           imageMd5: img.imageMd5,
+          imageOriginSourceMd5: img.imageOriginSourceMd5,
           imageDatName: img.imageDatName,
           createTime: img.createTime,
           force: true,
@@ -8401,6 +8410,15 @@ const senderAvatarCache = createBoundedCache<{ avatarUrl?: string; displayName?:
 })
 const senderAvatarLoading = new Map<string, Promise<{ avatarUrl?: string; displayName?: string } | null>>()
 
+function extractImageOriginSourceMd5(rawContent?: string, imageMd5?: string): string | undefined {
+  if (!rawContent) return undefined
+  const match = /originsourcemd5\s*=\s*['"]([a-fA-F0-9]+)['"]/i.exec(rawContent)
+  const value = match?.[1]?.trim().toLowerCase()
+  if (!value) return undefined
+  const displayMd5 = String(imageMd5 || '').trim().toLowerCase()
+  return displayMd5 && value === displayMd5 ? undefined : value
+}
+
 function getSharedImageDecryptTask(
   key: string,
   createTask: () => Promise<SharedImageDecryptResult>
@@ -8433,7 +8451,10 @@ const buildVoiceCacheIdentity = (
 // 引用消息中的动画表情组件
 function QuotedEmoji({ cdnUrl, md5 }: { cdnUrl: string; md5?: string }) {
   const cacheKey = md5 || cdnUrl
-  const [localPath, setLocalPath] = useState<string | undefined>(() => emojiDataUrlCache.get(cacheKey))
+  const [localPath, setLocalPath] = useState<string | undefined>(() => {
+    const cached = emojiDataUrlCache.get(cacheKey)
+    return cached ? toRenderableImageSrc(cached) : undefined
+  })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(false)
 
@@ -8443,7 +8464,7 @@ function QuotedEmoji({ cdnUrl, md5 }: { cdnUrl: string; md5?: string }) {
     window.electronAPI.chat.downloadEmoji(cdnUrl, md5).then((result: { success: boolean; localPath?: string }) => {
       if (result.success && result.localPath) {
         emojiDataUrlCache.set(cacheKey, result.localPath)
-        setLocalPath(result.localPath)
+        setLocalPath(toRenderableImageSrc(result.localPath))
       } else {
         setError(true)
       }
@@ -8509,9 +8530,12 @@ function MessageBubble({
   // 缓存相关的 state 必须在所有 Hooks 之前声明
   const cacheKey = message.emojiMd5 || message.emojiCdnUrl || ''
   const [emojiLocalPath, setEmojiLocalPath] = useState<string | undefined>(
-    () => emojiDataUrlCache.get(cacheKey) || message.emojiLocalPath
+    () => toRenderableImageSrc(emojiDataUrlCache.get(cacheKey) || message.emojiLocalPath)
   )
   const imageCacheKey = message.imageMd5 || message.imageDatName || `local:${message.localId}`
+  const resolvedImageOriginSourceMd5 =
+    message.imageOriginSourceMd5 ||
+    extractImageOriginSourceMd5(message.rawContent, message.imageMd5)
   const [imageLocalPath, setImageLocalPath] = useState<string | undefined>(
     () => toRenderableImageSrc(imageDataUrlCache.get(imageCacheKey))
   )
@@ -8783,7 +8807,7 @@ function MessageBubble({
     const cached = emojiDataUrlCache.get(cacheKey)
     if (cached) {
       captureEmojiResizeBaseline()
-      setEmojiLocalPath(cached)
+      setEmojiLocalPath(toRenderableImageSrc(cached))
       setEmojiError(false)
       return
     }
@@ -8794,7 +8818,7 @@ function MessageBubble({
       if (result.success && result.localPath) {
         emojiDataUrlCache.set(cacheKey, result.localPath)
         captureEmojiResizeBaseline()
-        setEmojiLocalPath(result.localPath)
+        setEmojiLocalPath(toRenderableImageSrc(result.localPath))
       } else {
         setEmojiError(true)
       }
@@ -8883,7 +8907,7 @@ function MessageBubble({
     // 后端已从本地缓存找到文件（转发表情包无 CDN URL 的情况）
     if (isEmoji && message.emojiLocalPath) {
       captureEmojiResizeBaseline()
-      setEmojiLocalPath(message.emojiLocalPath)
+      setEmojiLocalPath(toRenderableImageSrc(message.emojiLocalPath))
       return
     }
     if (isEmoji && message.emojiCdnUrl && !emojiLoading && !emojiError) {
@@ -8895,17 +8919,19 @@ function MessageBubble({
     if (!isImage) return { success: false }
     if (imageDecryptPendingRef.current) return { success: false }
     imageDecryptPendingRef.current = true
+    const resolvedOriginSourceMd5 = resolvedImageOriginSourceMd5
     if (!silent) {
       setImageLoading(true)
       setImageError(false)
     }
     try {
-      if (message.imageMd5 || message.imageDatName) {
+      if (message.imageMd5 || resolvedOriginSourceMd5 || message.imageDatName) {
         const sharedDecryptKey = `${session.username}:${imageCacheKey}:${forceUpdate ? 'force' : 'normal'}`
         const result = await getSharedImageDecryptTask(sharedDecryptKey, async () => {
           return await window.electronAPI.image.decrypt({
             sessionId: session.username,
             imageMd5: message.imageMd5 || undefined,
+            imageOriginSourceMd5: resolvedOriginSourceMd5 || undefined,
             imageDatName: message.imageDatName,
             createTime: message.createTime,
             force: forceUpdate,
@@ -8968,10 +8994,10 @@ function MessageBubble({
       imageDecryptPendingRef.current = false
     }
     return { success: false }
-  }, [isImage, message.imageMd5, message.imageDatName, message.createTime, message.localId, session.username, imageCacheKey, detectImageMimeFromBase64, imageLocalPath, captureImageResizeBaseline, lockImageStageHeight])
+  }, [isImage, message.imageMd5, resolvedImageOriginSourceMd5, message.imageDatName, message.createTime, message.localId, session.username, imageCacheKey, detectImageMimeFromBase64, imageLocalPath, captureImageResizeBaseline, lockImageStageHeight])
 
   const triggerForceHd = useCallback(async (): Promise<void> => {
-    if (!message.imageMd5 && !message.imageDatName) return
+    if (!message.imageMd5 && !resolvedImageOriginSourceMd5 && !message.imageDatName) return
     if (imageForceHdAttempted.current === imageCacheKey) return
     if (imageForceHdPending.current) return
     imageForceHdAttempted.current = imageCacheKey
@@ -8979,7 +9005,7 @@ function MessageBubble({
     await requestImageDecrypt(true, true).finally(() => {
       imageForceHdPending.current = false
     })
-  }, [imageCacheKey, message.imageDatName, message.imageMd5, requestImageDecrypt])
+  }, [imageCacheKey, message.imageDatName, message.imageMd5, resolvedImageOriginSourceMd5, requestImageDecrypt])
 
   const handleImageClick = useCallback(() => {
     if (imageClickTimerRef.current) {
@@ -8992,11 +9018,12 @@ function MessageBubble({
     console.info('[UI] image decrypt click (force HD)', {
       sessionId: session.username,
       imageMd5: message.imageMd5,
+      imageOriginSourceMd5: resolvedImageOriginSourceMd5,
       imageDatName: message.imageDatName,
       localId: message.localId
     })
     void requestImageDecrypt(true)
-  }, [message.imageDatName, message.imageMd5, message.localId, requestImageDecrypt, session.username])
+  }, [message.imageDatName, message.imageMd5, resolvedImageOriginSourceMd5, message.localId, requestImageDecrypt, session.username])
 
   const handleOpenImageViewer = useCallback(async () => {
     if (!imageLocalPath) return
@@ -9006,7 +9033,7 @@ function MessageBubble({
 
     // Every explicit preview click re-runs the forced HD search/decrypt path so
     // users don't need to re-enter the session after WeChat materializes a new original image.
-    if (message.imageMd5 || message.imageDatName) {
+    if (message.imageMd5 || resolvedImageOriginSourceMd5 || message.imageDatName) {
       try {
         const upgraded = await requestImageDecrypt(true, true)
         if (upgraded?.success && upgraded.localPath) {
@@ -9018,11 +9045,12 @@ function MessageBubble({
 
     // One more resolve helps when background/batch decrypt has produced a clearer image or live video
     // but local component state hasn't caught up yet.
-    if (message.imageMd5 || message.imageDatName) {
+    if (message.imageMd5 || resolvedImageOriginSourceMd5 || message.imageDatName) {
       try {
         const resolved = await window.electronAPI.image.resolveCache({
           sessionId: session.username,
           imageMd5: message.imageMd5 || undefined,
+          imageOriginSourceMd5: resolvedImageOriginSourceMd5 || undefined,
           imageDatName: message.imageDatName,
           createTime: message.createTime,
           preferFilePath: true,
@@ -9095,13 +9123,14 @@ function MessageBubble({
 
   useEffect(() => {
     if (!isImage || imageLoading || !imageInView) return
-    if (!message.imageMd5 && !message.imageDatName) return
+    if (!message.imageMd5 && !resolvedImageOriginSourceMd5 && !message.imageDatName) return
     if (imageUpdateCheckedRef.current === imageCacheKey) return
     imageUpdateCheckedRef.current = imageCacheKey
     let cancelled = false
     window.electronAPI.image.resolveCache({
       sessionId: session.username,
       imageMd5: message.imageMd5 || undefined,
+      imageOriginSourceMd5: resolvedImageOriginSourceMd5 || undefined,
       imageDatName: message.imageDatName,
       createTime: message.createTime,
       preferFilePath: true,
@@ -9199,7 +9228,7 @@ function MessageBubble({
   useEffect(() => {
     if (!isImage || !imageInView) return
     if (imageLocalPath || imageLoading) return
-    if (!message.imageMd5 && !message.imageDatName) return
+    if (!message.imageMd5 && !resolvedImageOriginSourceMd5 && !message.imageDatName) return
     if (imageAutoDecryptTriggered.current) return
     imageAutoDecryptTriggered.current = true
     void enqueueAutoMediaTask(async () => requestImageDecrypt()).catch(() => { })

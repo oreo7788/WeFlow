@@ -309,6 +309,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     decrypt: (payload: {
       sessionId?: string
       imageMd5?: string
+      imageOriginSourceMd5?: string
       imageDatName?: string
       createTime?: number
       force?: boolean
@@ -322,6 +323,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     resolveCache: (payload: {
       sessionId?: string
       imageMd5?: string
+      imageOriginSourceMd5?: string
       imageDatName?: string
       createTime?: number
       preferFilePath?: boolean
@@ -332,11 +334,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }) =>
       ipcRenderer.invoke('image:resolveCache', payload),
     resolveCacheBatch: (
-      payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number; preferFilePath?: boolean; hardlinkOnly?: boolean }>,
+      payloads: Array<{ sessionId?: string; imageMd5?: string; imageOriginSourceMd5?: string; imageDatName?: string; createTime?: number; preferFilePath?: boolean; hardlinkOnly?: boolean }>,
       options?: { disableUpdateCheck?: boolean; allowCacheIndex?: boolean; preferFilePath?: boolean; hardlinkOnly?: boolean; suppressEvents?: boolean }
     ) => ipcRenderer.invoke('image:resolveCacheBatch', payloads, options),
     preload: (
-      payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number }>,
+      payloads: Array<{ sessionId?: string; imageMd5?: string; imageOriginSourceMd5?: string; imageDatName?: string; createTime?: number }>,
       options?: { allowDecrypt?: boolean; allowCacheIndex?: boolean }
     ) => ipcRenderer.invoke('image:preload', payloads, options),
     preloadHardlinkMd5s: (md5List: string[]) =>

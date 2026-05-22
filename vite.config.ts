@@ -113,7 +113,8 @@ export default defineConfig({
                 'exceljs',
                 'node-llama-cpp',
                 '@vscode/sudo-prompt',
-                'silk-wasm'
+                'silk-wasm',
+                'ffmpeg-static'
               ]
             }
           }
@@ -222,7 +223,8 @@ export default defineConfig({
                 'better-sqlite3',
                 'koffi',
                 'fsevents',
-                'exceljs'
+                'exceljs',
+                'ffmpeg-static'
               ],
               output: {
                 entryFileNames: 'exportWorker.js',

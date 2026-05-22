@@ -4228,8 +4228,12 @@ class ExportService {
       const imagesDir = path.join(mediaRootDir, mediaRelativePrefix, 'images')
       await this.ensureExportDir(imagesDir, control, dirCache)
 
-      const tryResolveImagePath = async (imageMd5?: string, imageDatName?: string): Promise<string | null> => {
-        if (!imageMd5 && !imageDatName) return null
+      const tryResolveImagePath = async (
+        imageMd5?: string,
+        imageDatName?: string,
+        imageOriginSourceMd5?: string
+      ): Promise<string | null> => {
+        if (!imageMd5 && !imageOriginSourceMd5 && !imageDatName) return null
         return this.runWithChatImagePipelineLimit(async () => {
           const pickResolvedImagePath = (result: any): string | null => {
             if (!result?.success) return null
@@ -4237,10 +4241,15 @@ class ExportService {
             return resolved || null
           }
 
-          const resolveCachedPath = async (candidateMd5?: string, candidateDatName?: string): Promise<string | null> => {
+          const resolveCachedPath = async (
+            candidateMd5?: string,
+            candidateDatName?: string,
+            candidateOriginSourceMd5?: string
+          ): Promise<string | null> => {
             const cachedResult = await imageDecryptService.resolveCachedImage({
               sessionId,
               imageMd5: candidateMd5,
+              imageOriginSourceMd5: candidateOriginSourceMd5,
               imageDatName: candidateDatName,
               createTime: msg.createTime,
               preferFilePath: true,
@@ -4252,7 +4261,7 @@ class ExportService {
             return pickResolvedImagePath(cachedResult)
           }
 
-          const cachedPath = await resolveCachedPath(imageMd5, imageDatName)
+          const cachedPath = await resolveCachedPath(imageMd5, imageDatName, imageOriginSourceMd5)
           if (cachedPath) {
             return cachedPath
           }
@@ -4260,6 +4269,7 @@ class ExportService {
           const decryptResult = await imageDecryptService.decryptImage({
             sessionId,
             imageMd5,
+            imageOriginSourceMd5,
             imageDatName,
             createTime: msg.createTime,
             force: false,
@@ -4289,6 +4299,7 @@ class ExportService {
           const thumbResult = await imageDecryptService.resolveCachedImage({
             sessionId,
             imageMd5,
+            imageOriginSourceMd5,
             imageDatName,
             createTime: msg.createTime,
             preferFilePath: true,
@@ -4307,12 +4318,13 @@ class ExportService {
 
       // 使用消息对象中已提取的字段，先尝试快速导出。
       let imageMd5 = String(msg.imageMd5 || '').trim().toLowerCase() || undefined
+      let imageOriginSourceMd5 = String(msg.imageOriginSourceMd5 || '').trim().toLowerCase() || undefined
       let imageDatName = String(msg.imageDatName || '').trim().toLowerCase() || undefined
       const initialMissingRunCacheKey = this.getImageMissingRunCacheKey(sessionId, imageMd5, imageDatName)
       if (initialMissingRunCacheKey && this.mediaRunMissingImageKeys.has(initialMissingRunCacheKey)) {
         return null
       }
-      let sourcePath = await tryResolveImagePath(imageMd5, imageDatName)
+      let sourcePath = await tryResolveImagePath(imageMd5, imageDatName, imageOriginSourceMd5)
 
       // 快速流字段存在偏差时，按 localId 强制回填再重试一次，避免“导出进度前进但写入 0”。
       if (!sourcePath) {
@@ -4320,8 +4332,9 @@ class ExportService {
         if (Number.isFinite(localId) && localId > 0) {
           await this.backfillMediaFieldsFromMessageDetail(sessionId, [msg], new Set([3]), undefined, { force: true })
           imageMd5 = String(msg.imageMd5 || '').trim().toLowerCase() || undefined
+          imageOriginSourceMd5 = String(msg.imageOriginSourceMd5 || '').trim().toLowerCase() || undefined
           imageDatName = String(msg.imageDatName || '').trim().toLowerCase() || undefined
-          sourcePath = await tryResolveImagePath(imageMd5, imageDatName)
+          sourcePath = await tryResolveImagePath(imageMd5, imageDatName, imageOriginSourceMd5)
         }
       }
 
@@ -4408,6 +4421,10 @@ class ExportService {
         const imageMd5 = String(msg?.imageMd5 || '').trim().toLowerCase()
         if (imageMd5) {
           imageMd5Set.add(imageMd5)
+        }
+        const imageOriginSourceMd5 = String(msg?.imageOriginSourceMd5 || '').trim().toLowerCase()
+        if (imageOriginSourceMd5) {
+          imageMd5Set.add(imageOriginSourceMd5)
         }
         const imageDatName = String(msg?.imageDatName || '').trim().toLowerCase()
         if (md5Pattern.test(imageDatName)) {
@@ -4652,6 +4669,15 @@ class ExportService {
     if (!content) return undefined
     const match = /md5="([^"]+)"/i.exec(content)
     return match?.[1]
+  }
+
+  private extractImageOriginSourceMd5(content: string): string | undefined {
+    if (!content) return undefined
+    const match = /originsourcemd5="([^"]+)"/i.exec(content)
+    const value = match?.[1]?.trim().toLowerCase()
+    if (!value) return undefined
+    const displayMd5 = this.extractImageMd5(content)?.trim().toLowerCase()
+    return value !== displayMd5 ? value : undefined
   }
 
   /**
@@ -5616,6 +5642,7 @@ class ExportService {
 
           // 提取媒体相关字段（轻量模式下跳过）
           let imageMd5: string | undefined
+          let imageOriginSourceMd5: string | undefined
           let imageDatName: string | undefined
           let emojiCdnUrl: string | undefined
           let emojiMd5: string | undefined
@@ -5681,6 +5708,7 @@ class ExportService {
             if (localType === 3 && content) {
               // 图片消息
               imageMd5 = imageMd5 || this.extractImageMd5(content)
+              imageOriginSourceMd5 = this.extractImageOriginSourceMd5(content)
               imageDatName = imageDatName || this.extractImageDatNameFromRow(row, content)
             } else if (localType === 43 && content) {
               // 视频消息
@@ -5709,6 +5737,7 @@ class ExportService {
             senderUsername: actualSender,
             isSend,
             imageMd5,
+            imageOriginSourceMd5,
             imageDatName,
             emojiCdnUrl,
             emojiMd5,
@@ -5923,8 +5952,10 @@ class ExportService {
 
         if (msg.localType === 3) {
           const imageMd5 = (String(row.image_md5 || row.imageMd5 || '').trim() || this.extractImageMd5(content) || '').toLowerCase()
+          const imageOriginSourceMd5 = this.extractImageOriginSourceMd5(content)
           const imageDatName = this.extractImageDatNameFromRow(row, content) || ''
           if (imageMd5) msg.imageMd5 = imageMd5
+          if (imageOriginSourceMd5) msg.imageOriginSourceMd5 = imageOriginSourceMd5
           if (imageDatName) msg.imageDatName = imageDatName
           return
         }

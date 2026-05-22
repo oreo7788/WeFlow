@@ -526,7 +526,7 @@ export interface ElectronAPI {
     getAllVoiceMessages: (sessionId: string) => Promise<{ success: boolean; messages?: Message[]; error?: string }>
     getAllImageMessages: (sessionId: string) => Promise<{
       success: boolean
-      images?: { imageMd5?: string; imageDatName?: string; createTime?: number }[]
+      images?: { imageMd5?: string; imageOriginSourceMd5?: string; imageDatName?: string; createTime?: number }[]
       error?: string
     }>
     getMessageDates: (sessionId: string) => Promise<{ success: boolean; dates?: string[]; error?: string }>
@@ -569,6 +569,7 @@ export interface ElectronAPI {
         senderUsername?: string
         isSend?: number | null
         imageMd5?: string
+        imageOriginSourceMd5?: string
         imageDatName?: string
         videoMd5?: string
         content?: string
@@ -682,6 +683,7 @@ export interface ElectronAPI {
     decrypt: (payload: {
       sessionId?: string
       imageMd5?: string
+      imageOriginSourceMd5?: string
       imageDatName?: string
       createTime?: number
       force?: boolean
@@ -694,6 +696,7 @@ export interface ElectronAPI {
     resolveCache: (payload: {
       sessionId?: string
       imageMd5?: string
+      imageOriginSourceMd5?: string
       imageDatName?: string
       createTime?: number
       preferFilePath?: boolean
@@ -703,7 +706,7 @@ export interface ElectronAPI {
       suppressEvents?: boolean
     }) => Promise<{ success: boolean; localPath?: string; hasUpdate?: boolean; liveVideoPath?: string; error?: string; failureKind?: 'not_found' | 'decrypt_failed' }>
     resolveCacheBatch: (
-      payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number; preferFilePath?: boolean; hardlinkOnly?: boolean }>,
+      payloads: Array<{ sessionId?: string; imageMd5?: string; imageOriginSourceMd5?: string; imageDatName?: string; createTime?: number; preferFilePath?: boolean; hardlinkOnly?: boolean }>,
       options?: { disableUpdateCheck?: boolean; allowCacheIndex?: boolean; preferFilePath?: boolean; hardlinkOnly?: boolean; suppressEvents?: boolean }
     ) => Promise<{
       success: boolean
@@ -711,7 +714,7 @@ export interface ElectronAPI {
       error?: string
     }>
     preload: (
-      payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number }>,
+      payloads: Array<{ sessionId?: string; imageMd5?: string; imageOriginSourceMd5?: string; imageDatName?: string; createTime?: number }>,
       options?: { allowDecrypt?: boolean; allowCacheIndex?: boolean }
     ) => Promise<boolean>
     preloadHardlinkMd5s: (md5List: string[]) => Promise<boolean>

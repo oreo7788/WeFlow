@@ -2100,6 +2100,7 @@ export class WcdbCore {
       senderUsername?: string
       isSend?: number | null
       imageMd5?: string
+      imageOriginSourceMd5?: string
       imageDatName?: string
       videoMd5?: string
       content?: string
@@ -2210,6 +2211,13 @@ export class WcdbCore {
         if (byTag) return byTag
         const byAttr = /(?:md5|imgmd5)\s*=\s*['"]?([a-fA-F0-9]{16,64})['"]?/i.exec(xml)
         return byAttr?.[1] || ''
+      }
+      const extractImageOriginSourceMd5 = (xml: string, displayMd5?: string): string => {
+        const byAttr = /originsourcemd5\s*=\s*['"]?([a-fA-F0-9]{16,64})['"]?/i.exec(xml)
+        const value = String(byAttr?.[1] || '').trim().toLowerCase()
+        if (!value) return ''
+        const md5 = String(displayMd5 || extractImageMd5(xml) || '').trim().toLowerCase()
+        return value !== md5 ? value : ''
       }
       const normalizeDatBase = (value: string): string => {
         const input = String(value || '').trim()
@@ -2518,6 +2526,7 @@ export class WcdbCore {
 
         let content = ''
         let imageMd5: string | undefined
+        let imageOriginSourceMd5: string | undefined
         let imageDatName: string | undefined
         let videoMd5: string | undefined
 
@@ -2528,6 +2537,11 @@ export class WcdbCore {
             content = decodeContentIfNeeded()
             if (!imageMd5) imageMd5 = extractImageMd5(content) || extractHexMd5(packedPayload) || undefined
             if (!imageDatName) imageDatName = extractImageDatName(row, content) || undefined
+          }
+          if (!imageOriginSourceMd5) {
+            const xmlForOrigin = content || decodeContentIfNeeded()
+            const originMd5 = extractImageOriginSourceMd5(xmlForOrigin, imageMd5)
+            if (originMd5) imageOriginSourceMd5 = originMd5
           }
         } else if (localType === 43) {
           videoMd5 =
@@ -2558,6 +2572,7 @@ export class WcdbCore {
           senderUsername: pickString(row, ['sender_username', 'senderUsername']) || undefined,
           isSend: row.is_send === null || row.is_send === undefined ? null : toInt(row.is_send),
           imageMd5,
+          imageOriginSourceMd5,
           imageDatName,
           videoMd5,
           content: localType === 43 ? (content || undefined) : undefined

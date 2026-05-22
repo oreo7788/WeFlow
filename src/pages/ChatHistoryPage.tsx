@@ -8,6 +8,15 @@ import './ChatHistoryPage.scss'
 
 const forwardedImageCache = new Map<string, string>()
 
+function extractOriginSourceMd5FromText(text?: string, displayMd5?: string): string | undefined {
+  if (!text) return undefined
+  const match = /originsourcemd5\s*=\s*['"]([a-fA-F0-9]+)['"]/i.exec(text)
+  const value = match?.[1]?.trim().toLowerCase()
+  if (!value) return undefined
+  const md5 = String(displayMd5 || '').trim().toLowerCase()
+  return md5 && value === md5 ? undefined : value
+}
+
 export default function ChatHistoryPage() {
   const params = useParams<{ sessionId: string; messageId: string; payloadId: string }>()
   const location = useLocation()
@@ -410,6 +419,10 @@ function ForwardedImage({ item, sessionId }: { item: ChatRecordItem; sessionId: 
     if (localPath || error) return
 
     let cancelled = false
+    const displayMd5 = item.fullmd5 || item.md5 || item.thumbfullmd5
+    const originSourceMd5 =
+      extractOriginSourceMd5FromText(item.datadesc, displayMd5) ||
+      extractOriginSourceMd5FromText(item.datatitle, displayMd5)
     const candidateMd5s = Array.from(new Set([
       item.thumbfullmd5,
       item.fullmd5,
@@ -419,8 +432,39 @@ function ForwardedImage({ item, sessionId }: { item: ChatRecordItem; sessionId: 
     const load = async () => {
       setLoading(true)
 
+      const resolvePayload = (imageMd5: string) => ({
+        sessionId,
+        imageMd5,
+        imageOriginSourceMd5: originSourceMd5
+      })
+
+      if (originSourceMd5) {
+        const cachedOrigin = await window.electronAPI.image.resolveCache(
+          resolvePayload(displayMd5 || candidateMd5s[0] || originSourceMd5)
+        )
+        if (cachedOrigin.success && cachedOrigin.localPath) {
+          if (!cancelled) {
+            forwardedImageCache.set(cacheKey, cachedOrigin.localPath)
+            setLocalPath(cachedOrigin.localPath)
+            setLoading(false)
+          }
+          return
+        }
+        const decryptedOrigin = await window.electronAPI.image.decrypt(
+          resolvePayload(displayMd5 || candidateMd5s[0] || originSourceMd5)
+        )
+        if (decryptedOrigin.success && decryptedOrigin.localPath) {
+          if (!cancelled) {
+            forwardedImageCache.set(cacheKey, decryptedOrigin.localPath)
+            setLocalPath(decryptedOrigin.localPath)
+            setLoading(false)
+          }
+          return
+        }
+      }
+
       for (const imageMd5 of candidateMd5s) {
-        const cached = await window.electronAPI.image.resolveCache({ imageMd5 })
+        const cached = await window.electronAPI.image.resolveCache(resolvePayload(imageMd5))
         if (cached.success && cached.localPath) {
           if (!cancelled) {
             forwardedImageCache.set(cacheKey, cached.localPath)
@@ -432,7 +476,7 @@ function ForwardedImage({ item, sessionId }: { item: ChatRecordItem; sessionId: 
       }
 
       for (const imageMd5 of candidateMd5s) {
-        const decrypted = await window.electronAPI.image.decrypt({ imageMd5 })
+        const decrypted = await window.electronAPI.image.decrypt(resolvePayload(imageMd5))
         if (decrypted.success && decrypted.localPath) {
           if (!cancelled) {
             forwardedImageCache.set(cacheKey, decrypted.localPath)

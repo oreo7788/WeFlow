@@ -49,6 +49,8 @@ interface ConfigSchema {
   themeId: string
   language: string
   logEnabled: boolean
+  /** 引用消息解析调试日志（主进程 console） */
+  chatQuoteDebugLogEnabled: boolean
   launchAtStartup?: boolean
   silentStartup?: boolean
   llmModelPath: string
@@ -190,6 +192,7 @@ export class ConfigService {
       themeId: 'cloud-dancer',
       language: 'zh-CN',
       logEnabled: false,
+      chatQuoteDebugLogEnabled: false,
       silentStartup: false,
       llmModelPath: '',
       whisperModelName: 'base',

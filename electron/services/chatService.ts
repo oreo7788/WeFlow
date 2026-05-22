@@ -62,6 +62,7 @@ export interface Message {
   quotedSender?: string
   // 图片/视频相关
   imageMd5?: string
+  imageOriginSourceMd5?: string
   imageDatName?: string
   videoMd5?: string
   aesKey?: string
@@ -4912,6 +4913,7 @@ class ChatService {
       let quotedContent: string | undefined
       let quotedSender: string | undefined
       let imageMd5: string | undefined
+      let imageOriginSourceMd5: string | undefined
       let imageDatName: string | undefined
       let videoMd5: string | undefined
       let aesKey: string | undefined
@@ -4997,6 +4999,7 @@ class ChatService {
       } else if (localType === 3 && content) {
         const imageInfo = this.parseImageInfo(content)
         imageMd5 = imageInfo.md5
+        imageOriginSourceMd5 = imageInfo.originSourceMd5
         aesKey = imageInfo.aesKey
         encrypVer = imageInfo.encrypVer
         cdnThumbUrl = imageInfo.cdnThumbUrl
@@ -5128,6 +5131,7 @@ class ChatService {
         quotedContent,
         quotedSender,
         imageMd5,
+        imageOriginSourceMd5,
         imageDatName,
         videoMd5,
         voiceDurationSeconds,
@@ -5444,18 +5448,27 @@ class ChatService {
   /**
    * 解析图片信息
    */
-  private parseImageInfo(content: string): { md5?: string; aesKey?: string; encrypVer?: number; cdnThumbUrl?: string } {
+  private parseImageInfo(content: string): { md5?: string; originSourceMd5?: string; aesKey?: string; encrypVer?: number; cdnThumbUrl?: string } {
     try {
       const md5 =
         this.extractXmlValue(content, 'md5') ||
         this.extractXmlAttribute(content, 'img', 'md5') ||
         undefined
+      const originSourceMd5Raw =
+        this.extractXmlAttribute(content, 'img', 'originsourcemd5') ||
+        undefined
+      const originSourceMd5 = originSourceMd5Raw
+        ? originSourceMd5Raw.trim().toLowerCase()
+        : undefined
       const aesKey = this.extractXmlAttribute(content, 'img', 'aeskey') || undefined
       const encrypVerStr = this.extractXmlAttribute(content, 'img', 'encrypver') || undefined
       const cdnThumbUrl = this.extractXmlAttribute(content, 'img', 'cdnthumburl') || undefined
 
       return {
         md5,
+        originSourceMd5: originSourceMd5 && originSourceMd5 !== md5?.toLowerCase()
+          ? originSourceMd5
+          : undefined,
         aesKey,
         encrypVer: encrypVerStr ? parseInt(encrypVerStr, 10) : undefined,
         cdnThumbUrl
@@ -5790,52 +5803,67 @@ class ChatService {
       const referMsgXml = normalizedContent.substring(referMsgStart, referMsgEnd + 11)
       const svrid = this.extractXmlValue(referMsgXml, 'svrid')
 
-      console.log('[DEBUG] parseMediaQuoteMessage - svrid:', svrid)
+      this.debugQuoteLog('parseMediaQuoteMessage - svrid:', svrid)
 
       if (!svrid) {
         return {}
       }
 
       // 简化方案:返回 svrid 标记
-      console.log('[DEBUG] parseMediaQuoteMessage - 返回标记:', `__SVRID__${svrid}__`)
+      this.debugQuoteLog('parseMediaQuoteMessage - 返回标记:', `__SVRID__${svrid}__`)
       return { content: `__SVRID__${svrid}__` }
     } catch {
       return {}
     }
   }
 
+  private isChatQuoteDebugEnabled(): boolean {
+    if (String(process.env.WEFLOW_CHAT_QUOTE_DEBUG || '').trim() === '1') return true
+    return this.configService.get('chatQuoteDebugLogEnabled') === true
+  }
+
+  private debugQuoteLog(message: string, meta?: unknown): void {
+    if (!this.isChatQuoteDebugEnabled()) return
+    if (meta !== undefined) {
+      console.log(`[DEBUG] ${message}`, meta)
+    } else {
+      console.log(`[DEBUG] ${message}`)
+    }
+  }
+
   async resolveQuotedMessages(messages: Message[], sessionId: string): Promise<void> {
-    console.log('[DEBUG] resolveQuotedMessages - 开始解析,消息数量:', messages.length)
+    this.debugQuoteLog('resolveQuotedMessages - 开始解析,消息数量:', messages.length)
     const svridsToResolve: Array<{ msg: Message; svrid: string }> = []
 
     for (const msg of messages) {
       if (msg.quotedContent && msg.quotedContent.startsWith('__SVRID__')) {
         const match = msg.quotedContent.match(/__SVRID__(.+?)__/)
         if (match) {
-          console.log('[DEBUG] resolveQuotedMessages - 找到需要解析的svrid:', match[1])
+          this.debugQuoteLog('resolveQuotedMessages - 找到需要解析的svrid:', match[1])
           svridsToResolve.push({ msg, svrid: match[1] })
         }
       }
     }
 
-    console.log('[DEBUG] resolveQuotedMessages - 需要解析的数量:', svridsToResolve.length)
+    this.debugQuoteLog('resolveQuotedMessages - 需要解析的数量:', svridsToResolve.length)
 
     if (svridsToResolve.length === 0) return
 
     const results = await Promise.allSettled(
       svridsToResolve.map(({ svrid }) => {
-        console.log('[DEBUG] resolveQuotedMessages - 查询svrid:', svrid, 'sessionId:', sessionId)
+        this.debugQuoteLog('resolveQuotedMessages - 查询svrid:', { svrid, sessionId })
         return wcdbService.getMessageByServerId(sessionId, svrid)
       })
     )
 
-    console.log('[DEBUG] resolveQuotedMessages - 查询结果数量:', results.length)
+    this.debugQuoteLog('resolveQuotedMessages - 查询结果数量:', results.length)
 
     for (let i = 0; i < results.length; i++) {
       const result = results[i]
       const { msg, svrid } = svridsToResolve[i]
 
-      console.log('[DEBUG] resolveQuotedMessages - 处理结果', i, ':', {
+      this.debugQuoteLog('resolveQuotedMessages - 处理结果', {
+        index: i,
         status: result.status,
         success: result.status === 'fulfilled' ? result.value.success : false,
         hasRow: result.status === 'fulfilled' && result.value.row ? true : false,
@@ -5848,7 +5876,7 @@ class ChatService {
         const rawMessageContent = result.value.row.message_content
         const rawCompressContent = result.value.row.compress_content
 
-        console.log('[DEBUG] resolveQuotedMessages - 原始数据:', {
+        this.debugQuoteLog('resolveQuotedMessages - 原始数据:', {
           hasMessageContent: !!rawMessageContent,
           hasCompressContent: !!rawCompressContent,
           messageContentType: typeof rawMessageContent,
@@ -5857,7 +5885,7 @@ class ChatService {
 
         const content = this.decodeMessageContent(rawMessageContent, rawCompressContent)
 
-        console.log('[DEBUG] resolveQuotedMessages - 解码后:', { localType, contentLength: content.length, contentPreview: content.substring(0, 50) })
+        this.debugQuoteLog('resolveQuotedMessages - 解码后:', { localType, contentLength: content.length, contentPreview: content.substring(0, 50) })
 
         if (localType === 1) {
           msg.quotedContent = this.sanitizeQuotedContent(content)
@@ -5874,13 +5902,13 @@ class ChatService {
         } else {
           msg.quotedContent = '[消息]'
         }
-        console.log('[DEBUG] resolveQuotedMessages - 更新后的quotedContent:', msg.quotedContent)
+        this.debugQuoteLog('resolveQuotedMessages - 更新后的quotedContent:', msg.quotedContent)
       } else {
         msg.quotedContent = '[引用消息]'
-        console.log('[DEBUG] resolveQuotedMessages - 查询失败,使用占位符')
+        this.debugQuoteLog('resolveQuotedMessages - 查询失败,使用占位符')
       }
     }
-    console.log('[DEBUG] resolveQuotedMessages - 完成')
+    this.debugQuoteLog('resolveQuotedMessages - 完成')
   }
 
   private extractPreferredQuotedText(referMsgXml: string): string {
@@ -8084,9 +8112,10 @@ class ChatService {
       const msg = msgResult.message
       const rawImageInfo = msg.rawContent ? this.parseImageInfo(msg.rawContent) : {}
       const imageMd5 = msg.imageMd5 || rawImageInfo.md5
+      const imageOriginSourceMd5 = msg.imageOriginSourceMd5 || rawImageInfo.originSourceMd5
       const imageDatName = msg.imageDatName
 
-      if (!imageMd5 && !imageDatName) {
+      if (!imageMd5 && !imageOriginSourceMd5 && !imageDatName) {
         return { success: false, error: '图片缺少 md5/datName，无法定位原文件' }
       }
 
@@ -8094,6 +8123,7 @@ class ChatService {
       const result = await this.imageDecryptService.decryptImage({
         sessionId,
         imageMd5,
+        imageOriginSourceMd5,
         imageDatName,
         createTime: msg.createTime,
         force: false,
@@ -8946,7 +8976,7 @@ class ChatService {
    */
   async getAllImageMessages(
     sessionId: string
-  ): Promise<{ success: boolean; images?: { imageMd5?: string; imageDatName?: string; createTime?: number }[]; error?: string }> {
+  ): Promise<{ success: boolean; images?: { imageMd5?: string; imageOriginSourceMd5?: string; imageDatName?: string; createTime?: number }[]; error?: string }> {
     try {
       const connectResult = await this.ensureConnected()
       if (!connectResult.success) {
@@ -8959,20 +8989,21 @@ class ChatService {
       }
 
       const mapped = this.mapRowsToMessages(result.rows as Record<string, any>[], sessionId)
-      let allImages: Array<{ imageMd5?: string; imageDatName?: string; createTime?: number }> = mapped
+      let allImages: Array<{ imageMd5?: string; imageOriginSourceMd5?: string; imageDatName?: string; createTime?: number }> = mapped
         .filter(msg => msg.localType === 3)
         .map(msg => ({
           imageMd5: msg.imageMd5 || undefined,
+          imageOriginSourceMd5: msg.imageOriginSourceMd5 || undefined,
           imageDatName: msg.imageDatName || undefined,
           createTime: msg.createTime || undefined
         }))
-        .filter(img => Boolean(img.imageMd5 || img.imageDatName))
+        .filter(img => Boolean(img.imageMd5 || img.imageOriginSourceMd5 || img.imageDatName))
 
       allImages.sort((a, b) => (b.createTime || 0) - (a.createTime || 0))
 
       const seen = new Set<string>()
       allImages = allImages.filter(img => {
-        const key = img.imageMd5 || img.imageDatName || ''
+        const key = img.imageMd5 || img.imageOriginSourceMd5 || img.imageDatName || ''
         if (!key || seen.has(key)) return false
         seen.add(key)
         return true
@@ -11490,7 +11521,11 @@ class ChatService {
     // 图片/语音解析逻辑 (简化示例，实际应调用现有解析方法)
     if (msg.localType === 3) { // Image
       const imgInfo = this.parseImageInfo(rawContent)
-      Object.assign(msg, imgInfo)
+      msg.imageMd5 = imgInfo.md5
+      msg.imageOriginSourceMd5 = imgInfo.originSourceMd5
+      msg.aesKey = imgInfo.aesKey
+      msg.encrypVer = imgInfo.encrypVer
+      msg.cdnThumbUrl = imgInfo.cdnThumbUrl
       msg.imageDatName = this.parseImageDatNameFromRow(row)
     } else if (msg.localType === 43) { // Video
       msg.videoMd5 = this.parseVideoFileNameFromRow(row, rawContent)

@@ -158,6 +158,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
   const [imageKeyPercent, setImageKeyPercent] = useState<number | null>(null)
 
   const [logEnabled, setLogEnabled] = useState(false)
+  const [chatQuoteDebugLogEnabled, setChatQuoteDebugLogEnabled] = useState(false)
   const [autoDownloadHighRes, setAutoDownloadHighRes] = useState(false)
   const [whisperModelName, setWhisperModelName] = useState('base')
   const [whisperModelDir, setWhisperModelDir] = useState('')
@@ -451,6 +452,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
 
       const savedExportPath = await configService.getExportPath()
       const savedLogEnabled = await configService.getLogEnabled()
+      const savedChatQuoteDebugLogEnabled = await configService.getChatQuoteDebugLogEnabled()
       const savedImageXorKey = await configService.getImageXorKey()
       const savedImageAesKey = await configService.getImageAesKey()
       const savedWhisperModelName = await configService.getWhisperModelName()
@@ -509,6 +511,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       }
       setImageAesKey(imageAesKeyToUse)
       setLogEnabled(savedLogEnabled)
+      setChatQuoteDebugLogEnabled(savedChatQuoteDebugLogEnabled)
       setAutoTranscribeVoice(savedAutoTranscribe)
       setTranscribeLanguages(savedTranscribeLanguages)
 
@@ -1514,6 +1517,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       setWxid('')
       setCachePath('')
       setLogEnabled(false)
+      setChatQuoteDebugLogEnabled(false)
       setAutoTranscribeVoice(false)
       setTranscribeLanguages(['zh'])
       setWhisperModelDir('')
@@ -2550,6 +2554,29 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
           <button className="btn btn-secondary" onClick={handleClearLog}>
             <Trash2 size={16} /> 清空日志
           </button>
+        </div>
+      </div>
+
+      <div className="form-group">
+        <label>引用消息调试日志</label>
+        <span className="form-hint">开启后在主进程控制台输出引用消息解析的 [DEBUG] 日志，便于排查引用显示问题</span>
+        <div className="log-toggle-line">
+          <span className="log-status">{chatQuoteDebugLogEnabled ? '已开启' : '已关闭'}</span>
+          <label className="switch" htmlFor="chat-quote-debug-log-toggle">
+            <input
+              id="chat-quote-debug-log-toggle"
+              className="switch-input"
+              type="checkbox"
+              checked={chatQuoteDebugLogEnabled}
+              onChange={async (e) => {
+                const enabled = e.target.checked
+                setChatQuoteDebugLogEnabled(enabled)
+                await configService.setChatQuoteDebugLogEnabled(enabled)
+                showMessage(enabled ? '已开启引用消息调试日志' : '已关闭引用消息调试日志', true)
+              }}
+            />
+            <span className="switch-slider" />
+          </label>
         </div>
       </div>
 

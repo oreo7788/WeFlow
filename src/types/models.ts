@@ -59,6 +59,7 @@ export interface Message {
   rawContent?: string  // 原始消息内容（保留用于兼容）
   content?: string  // 原始消息内容（XML）
   imageMd5?: string
+  imageOriginSourceMd5?: string
   imageDatName?: string
   emojiCdnUrl?: string
   emojiMd5?: string

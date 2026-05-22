@@ -17,6 +17,7 @@ interface MediaStreamItem {
   senderUsername?: string
   isSend?: number | null
   imageMd5?: string
+  imageOriginSourceMd5?: string
   imageDatName?: string
   videoMd5?: string
   content?: string
@@ -83,8 +84,38 @@ function getSafeImageDatName(item: Pick<MediaStreamItem, 'imageDatName' | 'image
   return datName
 }
 
-function hasImageLocator(item: Pick<MediaStreamItem, 'imageDatName' | 'imageMd5'>): boolean {
-  return Boolean(normalizeMediaToken(item.imageMd5) || getSafeImageDatName(item))
+function getImageOriginSourceMd5(item: Pick<MediaStreamItem, 'imageOriginSourceMd5' | 'imageMd5' | 'content'>): string {
+  const fromItem = normalizeMediaToken(item.imageOriginSourceMd5)
+  if (fromItem) return fromItem
+  if (!item.content) return ''
+  const match = /originsourcemd5\s*=\s*['"]([a-fA-F0-9]+)['"]/i.exec(item.content)
+  const value = match?.[1]?.trim().toLowerCase() || ''
+  const displayMd5 = normalizeMediaToken(item.imageMd5)
+  return value && value !== displayMd5 ? value : ''
+}
+
+function hasImageLocator(item: Pick<MediaStreamItem, 'imageDatName' | 'imageMd5' | 'imageOriginSourceMd5' | 'content'>): boolean {
+  return Boolean(
+    normalizeMediaToken(item.imageMd5) ||
+    getImageOriginSourceMd5(item) ||
+    getSafeImageDatName(item)
+  )
+}
+
+function buildImageResolvePayload(item: MediaStreamItem): {
+  sessionId: string
+  imageMd5?: string
+  imageOriginSourceMd5?: string
+  imageDatName?: string
+  createTime?: number
+} {
+  return {
+    sessionId: item.sessionId,
+    imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
+    imageOriginSourceMd5: getImageOriginSourceMd5(item) || undefined,
+    imageDatName: getSafeImageDatName(item) || undefined,
+    createTime: Number(item.createTime || 0) || undefined
+  }
 }
 
 function getItemKey(item: MediaStreamItem): string {
@@ -685,7 +716,7 @@ function ResourcesPage() {
     const to = Math.min(displayItems.length - 1, end)
     if (to < from) return
     const now = Date.now()
-    const payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number }> = []
+    const payloads: Array<{ sessionId?: string; imageMd5?: string; imageOriginSourceMd5?: string; imageDatName?: string; createTime?: number }> = []
     const itemKeys: string[] = []
     for (let i = from; i <= to; i += 1) {
       const item = displayItems[i]
@@ -694,12 +725,7 @@ function ResourcesPage() {
       if (previewPathMapRef.current[itemKey] || previewPatchRef.current[itemKey]) continue
       if (!hasImageLocator(item)) continue
       if ((imageCacheMissUntilRef.current[itemKey] || 0) > now) continue
-      payloads.push({
-        sessionId: item.sessionId,
-        imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
-        imageDatName: getSafeImageDatName(item) || undefined,
-        createTime: Number(item.createTime || 0) || undefined
-      })
+      payloads.push(buildImageResolvePayload(item))
       itemKeys.push(itemKey)
       if (payloads.length >= MAX_IMAGE_CACHE_RESOLVE_PER_TICK) break
     }
@@ -764,7 +790,7 @@ function ResourcesPage() {
     if (to < from) return
 
     const now = Date.now()
-    const payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number }> = []
+    const payloads: Array<{ sessionId?: string; imageMd5?: string; imageOriginSourceMd5?: string; imageDatName?: string; createTime?: number }> = []
     const dedup = new Set<string>()
     for (let i = from; i <= to; i += 1) {
       const item = displayItems[i]
@@ -773,16 +799,12 @@ function ResourcesPage() {
       if (previewPathMapRef.current[itemKey] || previewPatchRef.current[itemKey]) continue
       if (!hasImageLocator(item)) continue
       if ((imagePreloadUntilRef.current[itemKey] || 0) > now) continue
-      const dedupKey = `${item.sessionId || ''}|${normalizeMediaToken(item.imageMd5)}|${getSafeImageDatName(item)}`
+      const payload = buildImageResolvePayload(item)
+      const dedupKey = `${payload.sessionId || ''}|${payload.imageMd5 || ''}|${payload.imageOriginSourceMd5 || ''}|${payload.imageDatName || ''}`
       if (dedup.has(dedupKey)) continue
       dedup.add(dedupKey)
       imagePreloadUntilRef.current[itemKey] = now + 12000
-      payloads.push({
-        sessionId: item.sessionId,
-        imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
-        imageDatName: getSafeImageDatName(item) || undefined,
-        createTime: Number(item.createTime || 0) || undefined
-      })
+      payloads.push(payload)
       if (payloads.length >= MAX_IMAGE_CACHE_PRELOAD_PER_TICK) break
     }
     if (payloads.length === 0) return
@@ -831,10 +853,7 @@ function ResourcesPage() {
     try {
       if (item.mediaType === 'image') {
         const resolved = await window.electronAPI.image.resolveCache({
-          sessionId: item.sessionId,
-          imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
-          imageDatName: getSafeImageDatName(item) || undefined,
-          createTime: Number(item.createTime || 0) || undefined,
+          ...buildImageResolvePayload(item),
           preferFilePath: true,
           hardlinkOnly: true,
           allowCacheIndex: true,
@@ -845,6 +864,7 @@ function ResourcesPage() {
         const rows: Array<{ label: string; value: string }> = [
           ...baseRows,
           { label: 'imageMd5', value: formatInfoValue(normalizeMediaToken(item.imageMd5)) },
+          { label: 'imageOriginSourceMd5', value: formatInfoValue(getImageOriginSourceMd5(item)) },
           { label: 'imageDatName', value: formatInfoValue(getSafeImageDatName(item)) },
           { label: '列表预览路径', value: formatInfoValue(previewPath) },
           { label: '缓存命中', value: resolved?.success && cachePath ? '是' : '否' },
@@ -1093,10 +1113,7 @@ function ResourcesPage() {
 
     try {
       const result = await window.electronAPI.image.decrypt({
-        sessionId: item.sessionId,
-        imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
-        imageDatName: getSafeImageDatName(item) || undefined,
-        createTime: Number(item.createTime || 0) || undefined,
+        ...buildImageResolvePayload(item),
         force: true,
         preferFilePath: true,
         hardlinkOnly: true,
@@ -1121,10 +1138,7 @@ function ResourcesPage() {
       }
       try {
         const resolved = await window.electronAPI.image.resolveCache({
-          sessionId: item.sessionId,
-          imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
-          imageDatName: getSafeImageDatName(item) || undefined,
-          createTime: Number(item.createTime || 0) || undefined,
+          ...buildImageResolvePayload(item),
           preferFilePath: true,
           hardlinkOnly: true,
           allowCacheIndex: true,
@@ -1162,10 +1176,7 @@ function ResourcesPage() {
     if (localPath) {
       try {
         const resolved = await window.electronAPI.image.resolveCache({
-          sessionId: item.sessionId,
-          imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
-          imageDatName: getSafeImageDatName(item) || undefined,
-          createTime: Number(item.createTime || 0) || undefined,
+          ...buildImageResolvePayload(item),
           preferFilePath: true,
           hardlinkOnly: true,
           allowCacheIndex: true,
@@ -1186,10 +1197,7 @@ function ResourcesPage() {
 
     try {
       const resolved = await window.electronAPI.image.resolveCache({
-        sessionId: item.sessionId,
-        imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
-        imageDatName: getSafeImageDatName(item) || undefined,
-        createTime: Number(item.createTime || 0) || undefined,
+        ...buildImageResolvePayload(item),
         preferFilePath: true,
         hardlinkOnly: true,
         allowCacheIndex: true,
@@ -1256,10 +1264,9 @@ function ResourcesPage() {
       for (const item of imageItems) {
         if (!hasImageLocator(item)) continue
         const imageMd5 = normalizeMediaToken(item.imageMd5)
-        if (imageMd5) {
-          hardlinkMd5Set.add(imageMd5)
-          continue
-        }
+        if (imageMd5) hardlinkMd5Set.add(imageMd5)
+        const imageOriginSourceMd5 = getImageOriginSourceMd5(item)
+        if (imageOriginSourceMd5) hardlinkMd5Set.add(imageOriginSourceMd5)
         const imageDatName = getSafeImageDatName(item)
         if (/^[a-f0-9]{32}$/i.test(imageDatName)) {
           hardlinkMd5Set.add(imageDatName)
@@ -1287,10 +1294,7 @@ function ResourcesPage() {
               continue
             }
             const result = await window.electronAPI.image.decrypt({
-              sessionId: item.sessionId,
-              imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
-              imageDatName: getSafeImageDatName(item) || undefined,
-              createTime: Number(item.createTime || 0) || undefined,
+              ...buildImageResolvePayload(item),
               force: true,
               preferFilePath: true,
               hardlinkOnly: true,

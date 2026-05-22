@@ -825,21 +825,31 @@ const requestMainWindowCloseConfirmation = (win: BrowserWindow): void => {
   })
 }
 
-function createWindow(options: { autoShow?: boolean } = {}) {
-  // 获取图标路径 - 打包后在 resources 目录
-  const { autoShow = true } = options
-  let iconName = 'icon.ico';
-  if (process.platform === 'linux') {
-    iconName = 'icon.png';
-  } else if (process.platform === 'darwin') {
-    iconName = 'icon.icns';
+function resolveAppIconPath(iconName?: string): string {
+  let resolvedName = iconName
+  if (!resolvedName) {
+    if (process.platform === 'linux') resolvedName = 'icon.png'
+    else if (process.platform === 'darwin') resolvedName = 'icon.icns'
+    else resolvedName = 'icon.ico'
   }
 
   const isDev = !!process.env.VITE_DEV_SERVER_URL
+  if (!isDev) {
+    return join(process.resourcesPath, resolvedName)
+  }
 
-  const iconPath = isDev
-      ? join(__dirname, `../public/${iconName}`)
-      : join(process.resourcesPath, iconName);
+  if (process.platform === 'darwin' && resolvedName === 'icon.icns') {
+    const macIconPath = join(__dirname, '../resources/icons/macos/icon.icns')
+    if (existsSync(macIconPath)) return macIconPath
+  }
+
+  return join(__dirname, `../public/${resolvedName}`)
+}
+
+function createWindow(options: { autoShow?: boolean } = {}) {
+  // 获取图标路径 - 打包后在 resources 目录
+  const { autoShow = true } = options
+  const iconPath = resolveAppIconPath()
 
   const win = new BrowserWindow({
     width: 1400,
@@ -4255,18 +4265,7 @@ app.whenReady().then(async () => {
   ensureWeChatRequestHeaderInterceptor()
   mainWindow = createWindow({ autoShow: false })
 
-  let iconName = 'icon.ico';
-  if (process.platform === 'linux') {
-    iconName = 'icon.png';
-  } else if (process.platform === 'darwin') {
-    iconName = 'icon.icns';
-  }
-
-  const isDev = !!process.env.VITE_DEV_SERVER_URL
-
-  const resolvedTrayIcon = isDev
-      ? join(__dirname, `../public/${iconName}`)
-      : join(process.resourcesPath, iconName);
+  const resolvedTrayIcon = resolveAppIconPath()
 
 
   try {

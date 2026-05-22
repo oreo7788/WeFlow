@@ -1452,6 +1452,12 @@ class HttpService {
         const imageMd5 = String(msg.imageMd5 || '').trim().toLowerCase()
         if (imageMd5) {
           imageMd5Set.add(imageMd5)
+        }
+        const imageOriginSourceMd5 = String(msg.imageOriginSourceMd5 || '').trim().toLowerCase()
+        if (imageOriginSourceMd5) {
+          imageMd5Set.add(imageOriginSourceMd5)
+        }
+        if (imageMd5 || imageOriginSourceMd5) {
           continue
         }
         const imageDatName = String(msg.imageDatName || '').trim().toLowerCase()
@@ -1489,6 +1495,7 @@ class HttpService {
         const result = await imageDecryptService.decryptImage({
           sessionId: talker,
           imageMd5: msg.imageMd5,
+          imageOriginSourceMd5: msg.imageOriginSourceMd5,
           imageDatName: msg.imageDatName,
           createTime: msg.createTime,
           force: true,
@@ -1504,6 +1511,7 @@ class HttpService {
             const cached = await imageDecryptService.resolveCachedImage({
               sessionId: talker,
               imageMd5: msg.imageMd5,
+              imageOriginSourceMd5: msg.imageOriginSourceMd5,
               imageDatName: msg.imageDatName,
               createTime: msg.createTime,
               preferFilePath: true,

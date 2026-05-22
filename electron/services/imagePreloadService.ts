@@ -3,6 +3,7 @@ import { imageDecryptService } from './imageDecryptService'
 type PreloadImagePayload = {
   sessionId?: string
   imageMd5?: string
+  imageOriginSourceMd5?: string
   imageDatName?: string
   createTime?: number
 }
@@ -33,7 +34,7 @@ export class ImagePreloadService {
     const allowCacheIndex = options?.allowCacheIndex !== false
     for (const payload of payloads) {
       if (!allowDecrypt && this.queue.length >= this.maxQueueSize) break
-      const cacheKey = payload.imageMd5 || payload.imageDatName
+      const cacheKey = payload.imageMd5 || payload.imageOriginSourceMd5 || payload.imageDatName
       if (!cacheKey) continue
       const key = `${payload.sessionId || 'unknown'}|${cacheKey}`
       if (this.pending.has(key)) continue
@@ -68,12 +69,13 @@ export class ImagePreloadService {
   }
 
   private async handleTask(task: PreloadTask): Promise<void> {
-    const cacheKey = task.imageMd5 || task.imageDatName
+    const cacheKey = task.imageMd5 || task.imageOriginSourceMd5 || task.imageDatName
     if (!cacheKey) return
     try {
       const cached = await imageDecryptService.resolveCachedImage({
         sessionId: task.sessionId,
         imageMd5: task.imageMd5,
+        imageOriginSourceMd5: task.imageOriginSourceMd5,
         imageDatName: task.imageDatName,
         createTime: task.createTime,
         preferFilePath: true,
@@ -87,6 +89,7 @@ export class ImagePreloadService {
       await imageDecryptService.decryptImage({
         sessionId: task.sessionId,
         imageMd5: task.imageMd5,
+        imageOriginSourceMd5: task.imageOriginSourceMd5,
         imageDatName: task.imageDatName,
         createTime: task.createTime,
         preferFilePath: true,
