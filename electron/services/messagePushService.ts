@@ -128,14 +128,14 @@ class MessagePushService {
     if (!PUSH_CONFIG_KEYS.has(String(key || '').trim())) return
     if (key === 'dbPath' || key === 'decryptKey' || key === 'myWxid') {
       this.resetRuntimeState()
-      chatService.close()
+      await chatService.close()
     }
     await this.refreshConfiguration(`config:${key}`)
   }
 
   handleConfigCleared(): void {
     this.resetRuntimeState()
-    chatService.close()
+    void chatService.close()
   }
 
   private isPushEnabled(): boolean {

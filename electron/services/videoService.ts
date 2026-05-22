@@ -1,9 +1,9 @@
 ﻿import { join } from 'path'
-import { existsSync, readdirSync, statSync, readFileSync, appendFileSync, mkdirSync } from 'fs'
+import { existsSync, readdirSync, statSync, readFileSync } from 'fs'
 import { pathToFileURL } from 'url'
-import { app } from 'electron'
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
+import { fileLogService } from '../utils/fileLogService'
 
 export interface VideoInfo {
   videoUrl?: string       // 视频文件路径（用于 readFile）
@@ -42,13 +42,8 @@ class VideoService {
   }
 
   private log(message: string, meta?: Record<string, unknown>): void {
-    try {
-      const timestamp = new Date().toISOString()
-      const metaStr = meta ? ` ${JSON.stringify(meta)}` : ''
-      const logDir = join(app.getPath('userData'), 'logs')
-      if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true })
-      appendFileSync(join(logDir, 'wcdb.log'), `[${timestamp}] [VideoService] ${message}${metaStr}\n`, 'utf8')
-    } catch { }
+    const metaStr = meta ? ` ${JSON.stringify(meta)}` : ''
+    fileLogService.write('video', `[VideoService] ${message}${metaStr}`)
   }
 
   private readTimedCache<T>(cache: Map<string, TimedCacheEntry<T>>, key: string): T | undefined {

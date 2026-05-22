@@ -12,6 +12,7 @@ import { wcdbService } from './services/wcdbService'
 import { chatService } from './services/chatService'
 import { imageDecryptService } from './services/imageDecryptService'
 import { logOptionalError } from './utils/logOptionalError'
+import { fileLogService } from './utils/fileLogService'
 import { imagePreloadService } from './services/imagePreloadService'
 import { analyticsService } from './services/analyticsService'
 import { groupAnalyticsService } from './services/groupAnalyticsService'
@@ -1930,14 +1931,12 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('log:getPath', async () => {
-    return join(app.getPath('userData'), 'logs', 'wcdb.log')
+    return fileLogService.getLogDir()
   })
 
   ipcMain.handle('log:read', async () => {
     try {
-      const logPath = join(app.getPath('userData'), 'logs', 'wcdb.log')
-      const content = await readFile(logPath, 'utf8')
-      return { success: true, content }
+      return { success: true, content: fileLogService.readAll() }
     } catch (e) {
       return { success: false, error: String(e) }
     }
@@ -1945,9 +1944,7 @@ function registerIpcHandlers() {
 
   ipcMain.handle('log:clear', async () => {
     try {
-      const logPath = join(app.getPath('userData'), 'logs', 'wcdb.log')
-      await mkdir(dirname(logPath), { recursive: true })
-      await writeFile(logPath, '', 'utf8')
+      fileLogService.clearAll()
       return { success: true }
     } catch (e) {
       return { success: false, error: String(e) }
@@ -2437,7 +2434,7 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('chat:close', async () => {
-    chatService.close()
+    await chatService.close()
     return true
   })
 
@@ -2462,8 +2459,8 @@ function registerIpcHandlers() {
     const warnings: string[] = []
 
     try {
-      wcdbService.close()
-      chatService.close()
+      await wcdbService.close()
+      await chatService.close()
     } catch (error) {
       warnings.push(`关闭数据库连接失败: ${String(error)}`)
     }
@@ -2473,7 +2470,7 @@ function registerIpcHandlers() {
         analyticsService.clearCache(),
         imageDecryptService.clearCache()
       ])
-      const chatResult = chatService.clearCaches()
+      const chatResult = await chatService.clearCaches()
       const cleanupResults = [analyticsResult, imageResult, chatResult]
       for (const result of cleanupResults) {
         if (!result.success && result.error) warnings.push(result.error)
@@ -3505,7 +3502,7 @@ function registerIpcHandlers() {
 
   ipcMain.handle('cache:clearImages', async () => {
     const imageResult = await imageDecryptService.clearCache()
-    const emojiResult = chatService.clearCaches({ includeMessages: false, includeContacts: false, includeEmojis: true })
+    const emojiResult = await chatService.clearCaches({ includeMessages: false, includeContacts: false, includeEmojis: true })
     snsService.clearMemoryCache()
     const errors = [imageResult, emojiResult]
       .filter((result) => !result.success)
@@ -3522,7 +3519,7 @@ function registerIpcHandlers() {
       analyticsService.clearCache(),
       imageDecryptService.clearCache()
     ])
-    const chatResult = chatService.clearCaches()
+    const chatResult = await chatService.clearCaches()
     snsService.clearMemoryCache()
     const errors = [analyticsResult, imageResult, chatResult]
       .filter((result) => !result.success)
@@ -4196,12 +4193,14 @@ app.whenReady().then(async () => {
   const fallbackResources = join(process.cwd(), 'resources')
   const resourcesPath = existsSync(candidateResources) ? candidateResources : fallbackResources
   const userDataPath = app.getPath('userData')
+  fileLogService.setUserDataPath(userDataPath)
   await delay(200)
 
   // 初始化数据库服务
   updateSplashProgress(20, '正在初始化...')
   wcdbService.setPaths(resourcesPath, userDataPath)
   wcdbService.setLogEnabled(configService.get('logEnabled') === true)
+  fileLogService.setLogEnabled(configService.get('logEnabled') === true)
   await delay(200)
 
   // 注册 IPC 处理器
@@ -4380,7 +4379,7 @@ const shutdownAppServices = async (): Promise<void> => {
     // 停止自动下载服务
     try { await imageDownloadService.stopAutoDownload() } catch (error) { logOptionalError('App.shutdown.imageDownload', error) }
     // 停止 chatService（内部会关闭 cursor 与 DB），避免退出阶段仍触发监控回调
-    try { chatService.close() } catch (error) { logOptionalError('App.shutdown.chatService', error) }
+    try { await chatService.close() } catch (error) { logOptionalError('App.shutdown.chatService', error) }
     // 停止 HTTP 服务器，释放 TCP 端口占用，避免进程无法退出
     try { await httpService.stop() } catch (error) { logOptionalError('App.shutdown.httpService', error) }
     // 终止 wcdb Worker 线程，避免线程阻止进程退出

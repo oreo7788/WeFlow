@@ -1,8 +1,8 @@
 import { join, dirname, basename } from 'path'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync } from 'fs'
-import { tmpdir } from 'os'
+import { existsSync, mkdirSync, readdirSync, statSync, readFileSync } from 'fs'
 import * as fzstd from 'fzstd'
 import { expandHomePath } from '../utils/pathUtils'
+import { fileLogService } from '../utils/fileLogService'
 
 //数据服务初始化错误信息，用于帮助用户诊断问题
 let lastDllInitError: string | null = null
@@ -148,13 +148,13 @@ export class WcdbCore {
   private readonly mediaStreamSessionCacheTtlMs = 12 * 1000
   private logTimer: NodeJS.Timeout | null = null
   private lastLogTail: string | null = null
-  private lastResolvedLogPath: string | null = null
   private lastCursorForceReopenAt = 0
   private readonly cursorForceReopenCooldownMs = 15000
 
   setPaths(resourcesPath: string, userDataPath: string): void {
     this.resourcesPath = resourcesPath
     this.userDataPath = userDataPath
+    fileLogService.setUserDataPath(userDataPath)
     this.writeLog(`[bootstrap] setPaths resourcesPath=${resourcesPath} userDataPath=${userDataPath}`, true)
   }
 
@@ -164,6 +164,7 @@ export class WcdbCore {
 
   setLogEnabled(enabled: boolean): void {
     this.logEnabled = enabled
+    fileLogService.setLogEnabled(enabled)
     this.writeLog(`[bootstrap] setLogEnabled=${enabled ? '1' : '0'} env.WCDB_LOG_ENABLED=${process.env.WCDB_LOG_ENABLED || ''}`, true)
     if (this.isLogEnabled() && this.initialized) {
       this.startLogPolling()
@@ -371,29 +372,7 @@ export class WcdbCore {
   }
 
   private writeLog(message: string, force = false): void {
-    if (!force && !this.isLogEnabled()) return
-    const line = `[${new Date().toISOString()}] ${message}`
-
-    const candidates: string[] = []
-    if (this.userDataPath) candidates.push(join(this.userDataPath, 'logs', 'wcdb.log'))
-    if (process.env.WCDB_LOG_DIR) candidates.push(join(process.env.WCDB_LOG_DIR, 'logs', 'wcdb.log'))
-    candidates.push(join(process.cwd(), 'logs', 'wcdb.log'))
-    candidates.push(join(tmpdir(), 'weflow-wcdb.log'))
-
-    const uniq = Array.from(new Set(candidates))
-    for (const filePath of uniq) {
-      try {
-        const dir = dirname(filePath)
-        if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-        appendFileSync(filePath, line + '\n', { encoding: 'utf8' })
-        this.lastResolvedLogPath = filePath
-        return
-      } catch (e) {
-        console.error(`[wcdbCore] writeLog failed path=${filePath}:`, e)
-      }
-    }
-
-    console.error('[wcdbCore] writeLog failed for all candidates:', uniq.join(' | '))
+    fileLogService.write('wcdb', message, { force })
   }
 
   private formatSqlForLog(sql: string, maxLen = 240): string {

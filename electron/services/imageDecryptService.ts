@@ -1,12 +1,13 @@
 ﻿import { app, BrowserWindow } from 'electron'
 import { basename, dirname, extname, join } from 'path'
 import { pathToFileURL } from 'url'
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, appendFileSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'fs'
 import { writeFile, rm, readdir } from 'fs/promises'
 import { homedir, tmpdir } from 'os'
 import crypto from 'crypto'
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
+import { fileLogService } from '../utils/fileLogService'
 import { decryptDatViaNative, nativeAddonLocation } from './nativeImageDecrypt'
 import { IMAGE_HARDLINK_PRELOAD_BATCH_SIZE } from '../constants/imageDecrypt'
 
@@ -132,32 +133,19 @@ export class ImageDecryptService {
 
   private logInfo(message: string, meta?: Record<string, unknown>): void {
     if (!this.configService.get('logEnabled')) return
-    const timestamp = new Date().toISOString()
     const metaStr = meta ? ` ${JSON.stringify(meta)}` : ''
-    const logLine = `[${timestamp}] [ImageDecrypt] ${message}${metaStr}\n`
-    this.writeLog(logLine)
+    fileLogService.write('image-decrypt', `[ImageDecrypt] ${message}${metaStr}`, { level: 'info' })
   }
 
   private logError(message: string, error?: unknown, meta?: Record<string, unknown>): void {
-    if (!this.configService.get('logEnabled')) return
-    const timestamp = new Date().toISOString()
     const errorStr = error ? ` Error: ${String(error)}` : ''
     const metaStr = meta ? ` ${JSON.stringify(meta)}` : ''
-    const logLine = `[${timestamp}] [ImageDecrypt] ERROR: ${message}${errorStr}${metaStr}\n`
     console.error(`[ImageDecrypt] ERROR: ${message}${errorStr}${metaStr}`)
-    this.writeLog(logLine)
-  }
-
-  private writeLog(line: string): void {
-    try {
-      const logDir = join(this.getUserDataPath(), 'logs')
-      if (!existsSync(logDir)) {
-        mkdirSync(logDir, { recursive: true })
-      }
-      appendFileSync(join(logDir, 'wcdb.log'), line, { encoding: 'utf8' })
-    } catch (err) {
-      console.error('写入日志失败:', err)
-    }
+    fileLogService.write(
+      'image-decrypt',
+      `[ImageDecrypt] ERROR: ${message}${errorStr}${metaStr}`,
+      { level: 'error', force: true }
+    )
   }
 
   async resolveCachedImage(payload: CachedImagePayload): Promise<DecryptResult & { hasUpdate?: boolean }> {

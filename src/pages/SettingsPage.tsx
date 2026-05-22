@@ -1558,7 +1558,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
   }
 
   const handleClearLog = async () => {
-    const confirmed = window.confirm('确定清空 wcdb.log 吗？')
+    const confirmed = window.confirm('确定清空所有日志文件吗？（wcdb.log、error.log 等）')
     if (!confirmed) return
     try {
       const result = await window.electronAPI.log.clear()
@@ -2546,7 +2546,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
         </div>
         <div className="log-actions">
           <button className="btn btn-secondary" onClick={handleOpenLog}>
-            <FolderOpen size={16} /> 打开日志文件
+            <FolderOpen size={16} /> 打开日志目录
           </button>
           <button className="btn btn-secondary" onClick={handleCopyLog}>
             <Copy size={16} /> 复制日志内容

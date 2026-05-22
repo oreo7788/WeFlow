@@ -43,15 +43,18 @@ export class MessageCursorService {
     }
   }
 
-  closeAllCursors(): void {
-    for (const state of this.messageCursors.values()) {
-      try {
-        wcdbService.closeMessageCursor(state.cursor)
-      } catch {
-        // ignore
-      }
-    }
+  async closeAllCursors(): Promise<void> {
+    const states = Array.from(this.messageCursors.values())
     this.messageCursors.clear()
+    await Promise.allSettled(
+      states.map(async (state) => {
+        try {
+          await wcdbService.closeMessageCursor(state.cursor)
+        } catch {
+          // ignore
+        }
+      })
+    )
   }
 
   async getMessages(
