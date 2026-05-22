@@ -2,6 +2,7 @@ import {
   IMAGE_HARDLINK_PRELOAD_BATCH_SIZE,
   IMAGE_HARDLINK_PRELOAD_SKIP_THRESHOLD
 } from '../constants/imageDecrypt'
+import { logOptionalError } from './logOptionalError'
 
 export type HardlinkPreloadProgressHandler = (detail: string) => void
 
@@ -52,7 +53,8 @@ export async function runHardlinkPreloadIfNeeded(
       )
     }
     return { skipped: false, hits: result.hits, total: result.total }
-  } catch {
+  } catch (error) {
+    logOptionalError('runHardlinkPreloadIfNeeded', error)
     onStatus('索引预热失败，将直接开始解密...')
     return { skipped: false }
   } finally {

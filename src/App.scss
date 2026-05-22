@@ -311,3 +311,12 @@
     }
   }
 }
+
+.page-loading-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}

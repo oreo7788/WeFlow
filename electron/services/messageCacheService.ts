@@ -1,7 +1,7 @@
 import { join, dirname } from 'path'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs'
-import { app } from 'electron'
 import { ConfigService } from './config'
+import { createDebouncedFilePersist } from '../utils/debouncedFilePersist'
 
 export interface SessionMessageCacheEntry {
   updatedAt: number
@@ -13,6 +13,7 @@ export class MessageCacheService {
   private cache: Record<string, SessionMessageCacheEntry> = {}
   private readonly sessionLimit = 150
   private readonly maxSessionEntries = 48
+  private readonly persistDebounced = createDebouncedFilePersist(() => this.writeCacheToDisk())
 
   constructor(cacheBasePath?: string) {
     const basePath = cacheBasePath && cacheBasePath.trim().length > 0
@@ -75,7 +76,7 @@ export class MessageCacheService {
     this.persist()
   }
 
-  private persist() {
+  private writeCacheToDisk() {
     try {
       writeFileSync(this.cacheFilePath, JSON.stringify(this.cache), 'utf8')
     } catch (error) {
@@ -83,7 +84,12 @@ export class MessageCacheService {
     }
   }
 
+  private persist() {
+    this.persistDebounced.schedule()
+  }
+
   clear(): void {
+    this.persistDebounced.cancel()
     this.cache = {}
     try {
       rmSync(this.cacheFilePath, { force: true })

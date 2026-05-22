@@ -1,3 +1,4 @@
+// 与 electron/constants/imageDecrypt.ts 保持同步
 /** 超过该数量的唯一 md5 标识时，批量解密跳过预热阶段 */
 export const IMAGE_HARDLINK_PRELOAD_SKIP_THRESHOLD = 2000
 

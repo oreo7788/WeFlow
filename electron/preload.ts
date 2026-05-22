@@ -486,7 +486,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // 导出
   export: {
-    getExportStats: (sessionIds: string[], options: any) =>
+    getExportStats: (sessionIds: string[], options: Record<string, unknown>) =>
       ipcRenderer.invoke('export:getExportStats', sessionIds, options),
     exportSessions: (sessionIds: string[], outputDir: string, options: any, controlOptions?: { taskId?: string }) =>
       ipcRenderer.invoke('export:exportSessions', sessionIds, outputDir, options, controlOptions),

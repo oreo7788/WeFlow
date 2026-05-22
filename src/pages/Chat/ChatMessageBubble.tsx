@@ -1,6 +1,7 @@
 import React from 'react'
 import { Check } from 'lucide-react'
 import { Avatar } from '../../components/Avatar'
+import { ErrorBoundary } from '../../components/ErrorBoundary'
 import type { ChatSession, Message } from '../../types/models'
 
 export interface ChatMessageBubbleProps {
@@ -96,7 +97,9 @@ function ChatMessageBubble({
                 {resolvedSenderName || '群成员'}
               </div>
             )}
-            {children}
+            <ErrorBoundary fallback={<div className="message-render-error">消息渲染出错</div>}>
+              {children}
+            </ErrorBoundary>
           </div>
         </div>
 

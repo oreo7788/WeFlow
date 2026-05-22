@@ -13,6 +13,8 @@ import { ConfigService } from './config'
 import { videoService } from './videoService'
 import { imageDecryptService } from './imageDecryptService'
 import { runHardlinkPreloadIfNeeded } from '../utils/runHardlinkPreload'
+import { collectImageHardlinkMd5s } from '../utils/collectImageHardlinkMd5s'
+import { logOptionalError } from '../utils/logOptionalError'
 import { groupAnalyticsService } from './groupAnalyticsService'
 import { snsService } from './snsService'
 
@@ -1447,27 +1449,13 @@ class HttpService {
 
     // 预热图片 hardlink 索引，减少逐条导出时的查找开销
     if (options.exportImages) {
-      const imageMd5Set = new Set<string>()
-      for (const msg of messages) {
-        if (msg.localType !== 3) continue
-        const imageMd5 = String(msg.imageMd5 || '').trim().toLowerCase()
-        if (imageMd5) {
-          imageMd5Set.add(imageMd5)
-        }
-        const imageOriginSourceMd5 = String(msg.imageOriginSourceMd5 || '').trim().toLowerCase()
-        if (imageOriginSourceMd5) {
-          imageMd5Set.add(imageOriginSourceMd5)
-        }
-        if (imageMd5 || imageOriginSourceMd5) {
-          continue
-        }
-        const imageDatName = String(msg.imageDatName || '').trim().toLowerCase()
-        if (/^[a-f0-9]{32}$/i.test(imageDatName)) {
-          imageMd5Set.add(imageDatName)
-        }
-      }
-      if (imageMd5Set.size > 0) {
-        await runHardlinkPreloadIfNeeded(Array.from(imageMd5Set)).catch(() => { })
+      const imageMd5List = collectImageHardlinkMd5s(
+        messages.filter((msg) => msg.localType === 3)
+      )
+      if (imageMd5List.length > 0) {
+        await runHardlinkPreloadIfNeeded(imageMd5List).catch((error) => {
+          logOptionalError('HttpService.preloadHardlink', error)
+        })
       }
     }
 

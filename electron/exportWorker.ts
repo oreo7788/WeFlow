@@ -6,7 +6,7 @@ interface ExportWorkerConfig {
   sessionId?: string
   outputDir?: string
   outputPath?: string
-  options?: any
+  options?: Record<string, unknown>
   taskId?: string
   dbPath?: string
   decryptKey?: string
@@ -16,6 +16,11 @@ interface ExportWorkerConfig {
   resourcesPath?: string
   userDataPath?: string
   logEnabled?: boolean
+}
+
+interface ExportProgressPayload {
+  phase?: string
+  [key: string]: unknown
 }
 
 const config = workerData as ExportWorkerConfig
@@ -30,7 +35,7 @@ const PROGRESS_POST_INTERVAL_MS = 180
 let queuedCreatedFiles: string[] = []
 let queuedCreatedDirs: string[] = []
 let createdPathFlushTimer: ReturnType<typeof setTimeout> | null = null
-let pendingProgress: any = null
+let pendingProgress: ExportProgressPayload | null = null
 let progressPostTimer: ReturnType<typeof setTimeout> | null = null
 let lastProgressPostedAt = 0
 
@@ -93,7 +98,7 @@ function flushProgress() {
   lastProgressPostedAt = Date.now()
 }
 
-function queueProgress(progress: any) {
+function queueProgress(progress: ExportProgressPayload) {
   pendingProgress = progress
   if (progress?.phase === 'complete') {
     flushProgress()
@@ -111,7 +116,7 @@ function queueProgress(progress: any) {
   progressPostTimer = setTimeout(flushProgress, PROGRESS_POST_INTERVAL_MS - elapsed)
 }
 
-parentPort?.on('message', (message: any) => {
+parentPort?.on('message', (message: { type?: string }) => {
   if (!message || typeof message.type !== 'string') return
   if (message.type === 'export:pause') {
     controlState.pauseRequested = true
@@ -138,22 +143,9 @@ if (config.userDataPath) {
 process.env.WEFLOW_PROJECT_NAME = process.env.WEFLOW_PROJECT_NAME || 'WeFlow'
 
 async function run() {
-  const [{ wcdbService }, { exportService }] = await Promise.all([
-    import('./services/wcdbService'),
-    import('./services/exportService')
-  ])
-
+  const { wcdbService } = await import('./services/wcdbService')
   wcdbService.setPaths(config.resourcesPath || '', config.userDataPath || '')
   wcdbService.setLogEnabled(config.logEnabled === true)
-  exportService.setRuntimeConfig({
-    dbPath: config.dbPath,
-    decryptKey: config.decryptKey,
-    myWxid: config.myWxid,
-    imageXorKey: config.imageXorKey,
-    imageAesKey: config.imageAesKey
-  })
-
-  const onProgress = (progress: any) => queueProgress(progress)
 
   const taskControl = config.taskId
     ? {
@@ -164,7 +156,9 @@ async function run() {
       }
     : undefined
 
-  let result: any
+  const onProgress = (progress: ExportProgressPayload) => queueProgress(progress)
+
+  let result: unknown
   if (config.mode === 'contacts') {
     const [{ contactExportService }, { chatService }] = await Promise.all([
       import('./services/contactExportService'),
@@ -179,22 +173,33 @@ async function run() {
       String(config.outputDir || ''),
       config.options || {}
     )
-  } else if (config.mode === 'single') {
-    result = await exportService.exportSessionToChatLab(
-      String(config.sessionId || '').trim(),
-      String(config.outputPath || '').trim(),
-      config.options || { format: 'chatlab' },
-      onProgress,
-      taskControl
-    )
   } else {
-    result = await exportService.exportSessions(
-      Array.isArray(config.sessionIds) ? config.sessionIds : [],
-      String(config.outputDir || ''),
-      config.options || { format: 'json' },
-      onProgress,
-      taskControl
-    )
+    const { exportService } = await import('./services/exportService')
+    exportService.setRuntimeConfig({
+      dbPath: config.dbPath,
+      decryptKey: config.decryptKey,
+      myWxid: config.myWxid,
+      imageXorKey: config.imageXorKey,
+      imageAesKey: config.imageAesKey
+    })
+
+    if (config.mode === 'single') {
+      result = await exportService.exportSessionToChatLab(
+        String(config.sessionId || '').trim(),
+        String(config.outputPath || '').trim(),
+        config.options || { format: 'chatlab' },
+        onProgress,
+        taskControl
+      )
+    } else {
+      result = await exportService.exportSessions(
+        Array.isArray(config.sessionIds) ? config.sessionIds : [],
+        String(config.outputDir || ''),
+        config.options || { format: 'json' },
+        onProgress,
+        taskControl
+      )
+    }
   }
 
   flushProgress()

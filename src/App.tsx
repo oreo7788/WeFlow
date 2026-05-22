@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, Suspense, lazy, type ReactNode } from 'react'
 import { Routes, Route, Navigate, useNavigate, useLocation, type Location } from 'react-router-dom'
 import TitleBar from './components/TitleBar'
 import Sidebar from './components/Sidebar'
@@ -6,29 +6,30 @@ import RouteGuard from './components/RouteGuard'
 import WelcomePage from './pages/WelcomePage'
 import HomePage from './pages/HomePage'
 import ChatPage from './pages/ChatPage'
-import AnalyticsPage from './pages/AnalyticsPage'
-import AnalyticsWelcomePage from './pages/AnalyticsWelcomePage'
-import ChatAnalyticsHubPage from './pages/ChatAnalyticsHubPage'
-import AnnualReportPage from './pages/AnnualReportPage'
-import AnnualReportWindow from './pages/AnnualReportWindow'
-import DualReportPage from './pages/DualReportPage'
-import DualReportWindow from './pages/DualReportWindow'
 import AgreementPage from './pages/AgreementPage'
-import GroupAnalyticsPage from './pages/GroupAnalyticsPage'
-import SettingsPage from './pages/SettingsPage'
-import ExportPage from './pages/ExportPage'
-import MyFootprintPage from './pages/MyFootprintPage'
-import VideoWindow from './pages/VideoWindow'
-import ImageWindow from './pages/ImageWindow'
-import SnsPage from './pages/SnsPage'
-import BizPage from './pages/BizPage'
-import ContactsPage from './pages/ContactsPage'
-import ResourcesPage from './pages/ResourcesPage'
 import ChatHistoryPage from './pages/ChatHistoryPage'
-import NotificationWindow from './pages/NotificationWindow'
-import AccountManagementPage from './pages/AccountManagementPage'
-import BackupPage from './pages/BackupPage'
-import InsightInboxPage from './pages/InsightInboxPage'
+
+const AnalyticsPage = lazy(() => import('./pages/AnalyticsPage'))
+const AnalyticsWelcomePage = lazy(() => import('./pages/AnalyticsWelcomePage'))
+const ChatAnalyticsHubPage = lazy(() => import('./pages/ChatAnalyticsHubPage'))
+const AnnualReportPage = lazy(() => import('./pages/AnnualReportPage'))
+const AnnualReportWindow = lazy(() => import('./pages/AnnualReportWindow'))
+const DualReportPage = lazy(() => import('./pages/DualReportPage'))
+const DualReportWindow = lazy(() => import('./pages/DualReportWindow'))
+const GroupAnalyticsPage = lazy(() => import('./pages/GroupAnalyticsPage'))
+const SettingsPage = lazy(() => import('./pages/SettingsPage'))
+const ExportPage = lazy(() => import('./pages/ExportPage'))
+const MyFootprintPage = lazy(() => import('./pages/MyFootprintPage'))
+const VideoWindow = lazy(() => import('./pages/VideoWindow'))
+const ImageWindow = lazy(() => import('./pages/ImageWindow'))
+const SnsPage = lazy(() => import('./pages/SnsPage'))
+const BizPage = lazy(() => import('./pages/BizPage'))
+const ContactsPage = lazy(() => import('./pages/ContactsPage'))
+const ResourcesPage = lazy(() => import('./pages/ResourcesPage'))
+const NotificationWindow = lazy(() => import('./pages/NotificationWindow'))
+const AccountManagementPage = lazy(() => import('./pages/AccountManagementPage'))
+const BackupPage = lazy(() => import('./pages/BackupPage'))
+const InsightInboxPage = lazy(() => import('./pages/InsightInboxPage'))
 
 import { useAppStore } from './stores/appStore'
 import { themes, useThemeStore, type ThemeId, type ThemeMode } from './stores/themeStore'
@@ -47,6 +48,18 @@ function RouteStateRedirect({ to }: { to: string }) {
   const location = useLocation()
 
   return <Navigate to={to} replace state={location.state} />
+}
+
+function PageLoadingFallback() {
+  return (
+    <div className="page-loading-fallback" aria-busy="true">
+      加载中...
+    </div>
+  )
+}
+
+function LazyPage({ children }: { children: ReactNode }) {
+  return <Suspense fallback={<PageLoadingFallback />}>{children}</Suspense>
 }
 
 function App() {
@@ -489,13 +502,21 @@ function App() {
 
   // 独立视频播放窗口
   if (isVideoPlayerWindow) {
-    return <VideoWindow />
+    return (
+      <LazyPage>
+        <VideoWindow />
+      </LazyPage>
+    )
   }
 
   // 独立图片查看窗口
   const isImageViewerWindow = location.pathname === '/image-viewer-window'
   if (isImageViewerWindow) {
-    return <ImageWindow />
+    return (
+      <LazyPage>
+        <ImageWindow />
+      </LazyPage>
+    )
   }
 
   // 独立聊天记录窗口
@@ -525,17 +546,29 @@ function App() {
 
   // 独立通知窗口
   if (isNotificationWindow) {
-    return <NotificationWindow />
+    return (
+      <LazyPage>
+        <NotificationWindow />
+      </LazyPage>
+    )
   }
 
   // 独立年度报告全屏窗口
   if (isAnnualReportWindow) {
-    return <AnnualReportWindow />
+    return (
+      <LazyPage>
+        <AnnualReportWindow />
+      </LazyPage>
+    )
   }
 
   // 独立双人报告全屏窗口
   if (isDualReportWindow) {
-    return <DualReportWindow />
+    return (
+      <LazyPage>
+        <DualReportWindow />
+      </LazyPage>
+    )
   }
 
   // 主窗口 - 完整布局
@@ -694,34 +727,36 @@ function App() {
         <main className="content">
           <RouteGuard>
             <div className={`export-keepalive-page ${isExportRoute ? 'active' : 'hidden'}`} aria-hidden={!isExportRoute}>
-              <ExportPage />
+              <LazyPage>
+                <ExportPage />
+              </LazyPage>
             </div>
 
             <Routes location={routeLocation}>
               <Route path="/" element={<HomePage />} />
               <Route path="/home" element={<HomePage />} />
-              <Route path="/account-management" element={<AccountManagementPage />} />
+              <Route path="/account-management" element={<LazyPage><AccountManagementPage /></LazyPage>} />
               <Route path="/chat" element={<ChatPage />} />
 
-              <Route path="/analytics" element={<ChatAnalyticsHubPage />} />
-              <Route path="/analytics/private" element={<AnalyticsWelcomePage />} />
-              <Route path="/analytics/private/view" element={<AnalyticsPage />} />
-              <Route path="/analytics/group" element={<GroupAnalyticsPage />} />
+              <Route path="/analytics" element={<LazyPage><ChatAnalyticsHubPage /></LazyPage>} />
+              <Route path="/analytics/private" element={<LazyPage><AnalyticsWelcomePage /></LazyPage>} />
+              <Route path="/analytics/private/view" element={<LazyPage><AnalyticsPage /></LazyPage>} />
+              <Route path="/analytics/group" element={<LazyPage><GroupAnalyticsPage /></LazyPage>} />
               <Route path="/analytics/view" element={<RouteStateRedirect to="/analytics/private/view" />} />
               <Route path="/group-analytics" element={<RouteStateRedirect to="/analytics/group" />} />
-              <Route path="/annual-report" element={<AnnualReportPage />} />
-              <Route path="/annual-report/view" element={<AnnualReportWindow />} />
-              <Route path="/dual-report" element={<DualReportPage />} />
-              <Route path="/dual-report/view" element={<DualReportWindow />} />
-              <Route path="/footprint" element={<MyFootprintPage />} />
+              <Route path="/annual-report" element={<LazyPage><AnnualReportPage /></LazyPage>} />
+              <Route path="/annual-report/view" element={<LazyPage><AnnualReportWindow /></LazyPage>} />
+              <Route path="/dual-report" element={<LazyPage><DualReportPage /></LazyPage>} />
+              <Route path="/dual-report/view" element={<LazyPage><DualReportWindow /></LazyPage>} />
+              <Route path="/footprint" element={<LazyPage><MyFootprintPage /></LazyPage>} />
 
               <Route path="/export" element={<div className="export-route-anchor" aria-hidden="true" />} />
-              <Route path="/sns" element={<SnsPage />} />
-              <Route path="/insight-inbox" element={<InsightInboxPage />} />
-              <Route path="/biz" element={<BizPage />} />
-              <Route path="/contacts" element={<ContactsPage />} />
-              <Route path="/resources" element={<ResourcesPage />} />
-              <Route path="/backup" element={<BackupPage />} />
+              <Route path="/sns" element={<LazyPage><SnsPage /></LazyPage>} />
+              <Route path="/insight-inbox" element={<LazyPage><InsightInboxPage /></LazyPage>} />
+              <Route path="/biz" element={<LazyPage><BizPage /></LazyPage>} />
+              <Route path="/contacts" element={<LazyPage><ContactsPage /></LazyPage>} />
+              <Route path="/resources" element={<LazyPage><ResourcesPage /></LazyPage>} />
+              <Route path="/backup" element={<LazyPage><BackupPage /></LazyPage>} />
               <Route path="/chat-history/:sessionId/:messageId" element={<ChatHistoryPage />} />
               <Route path="/chat-history-inline/:payloadId" element={<ChatHistoryPage />} />
             </Routes>
@@ -730,7 +765,9 @@ function App() {
       </div>
 
       {isSettingsRoute && (
-        <SettingsPage onClose={handleCloseSettings} />
+        <LazyPage>
+          <SettingsPage onClose={handleCloseSettings} />
+        </LazyPage>
       )}
     </div>
   )

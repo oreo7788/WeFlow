@@ -3,6 +3,7 @@ import {
   IMAGE_HARDLINK_PRELOAD_SKIP_THRESHOLD
 } from '../constants/imageDecrypt'
 import { imageDecryptService } from '../services/imageDecryptService'
+import { logOptionalError } from './logOptionalError'
 
 export type HardlinkPreloadProgressHandler = (payload: {
   current: number

@@ -34,6 +34,13 @@ import {
 import type { ChatSession as AppChatSession, ContactInfo } from '../types/models'
 import type { ExportOptions as ElectronExportOptions, ExportProgress } from '../types/electron'
 import type { BackgroundTaskRecord } from '../types/backgroundTask'
+import {
+  BACKGROUND_TASK_ACTIVE_STATUSES,
+  EXPORT_TASK_ACTIVE_STATUSES,
+  formatDurationMs,
+  formatTaskElapsedLabel,
+  getTaskElapsedMs
+} from '../utils/exportTaskTiming'
 import type {
   ExportAutomationCondition,
   ExportAutomationDateRangeConfig,
@@ -559,56 +566,6 @@ const getTaskPerformanceTopSessions = (
     })
     .sort((a, b) => b.liveElapsedMs - a.liveElapsedMs)
     .slice(0, limit)
-}
-
-const formatDurationMs = (ms: number): string => {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000))
-  const hours = Math.floor(totalSeconds / 3600)
-  const minutes = Math.floor((totalSeconds % 3600) / 60)
-  const seconds = totalSeconds % 60
-  if (hours > 0) {
-    return `${hours}小时${minutes}分${seconds}秒`
-  }
-  if (minutes > 0) {
-    return `${minutes}分${seconds}秒`
-  }
-  return `${seconds}秒`
-}
-
-const BACKGROUND_TASK_ACTIVE_STATUSES = new Set<BackgroundTaskRecord['status']>([
-  'running',
-  'pause_requested',
-  'paused',
-  'cancel_requested'
-])
-
-const EXPORT_TASK_ACTIVE_STATUSES = new Set<TaskStatus>([
-  'queued',
-  'running',
-  'pause_requested',
-  'paused',
-  'cancel_requested'
-])
-
-const getTaskElapsedMs = (
-  startedAt: number,
-  finishedAt: number | undefined,
-  nowTick: number,
-  isActive: boolean
-): number => {
-  const safeStart = Number.isFinite(startedAt) ? startedAt : nowTick
-  const end = isActive ? nowTick : (finishedAt || nowTick)
-  return Math.max(0, end - safeStart)
-}
-
-const formatTaskElapsedLabel = (
-  startedAt: number,
-  finishedAt: number | undefined,
-  nowTick: number,
-  isActive: boolean
-): string => {
-  const elapsedMs = getTaskElapsedMs(startedAt, finishedAt, nowTick, isActive)
-  return `${isActive ? '已运行' : '耗时'} ${formatDurationMs(elapsedMs)}`
 }
 
 const getTaskStatusLabel = (task: ExportTask): string => {

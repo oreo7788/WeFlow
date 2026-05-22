@@ -1,6 +1,7 @@
 import { join, dirname } from 'path'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs'
 import { ConfigService } from './config'
+import { createDebouncedFilePersist } from '../utils/debouncedFilePersist'
 
 const CACHE_VERSION = 2
 const MAX_SESSION_ENTRIES_PER_SCOPE = 2000
@@ -129,6 +130,7 @@ export class SessionStatsCacheService {
     version: CACHE_VERSION,
     scopes: {}
   }
+  private readonly persistDebounced = createDebouncedFilePersist(() => this.writeCacheToDisk())
 
   constructor(cacheBasePath?: string) {
     const basePath = cacheBasePath && cacheBasePath.trim().length > 0
@@ -283,11 +285,15 @@ export class SessionStatsCacheService {
     this.store.scopes = trimmedScopes
   }
 
-  private persist(): void {
+  private writeCacheToDisk(): void {
     try {
       writeFileSync(this.cacheFilePath, JSON.stringify(this.store), 'utf8')
     } catch (error) {
       console.error('SessionStatsCacheService: 保存缓存失败', error)
     }
+  }
+
+  private persist(): void {
+    this.persistDebounced.schedule()
   }
 }

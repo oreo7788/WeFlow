@@ -15,7 +15,7 @@ import { SessionStatsCacheService, SessionStatsCacheEntry, SessionStatsCacheStat
 import { GroupMyMessageCountCacheService, GroupMyMessageCountCacheEntry } from './groupMyMessageCountCacheService'
 import { exportCardDiagnosticsService } from './exportCardDiagnosticsService'
 import { voiceTranscribeService } from './voiceTranscribeService'
-import { ImageDecryptService } from './imageDecryptService'
+import { imageDecryptService } from './imageDecryptService'
 import { CONTACT_REGION_LOOKUP_DATA } from './contactRegionLookupData'
 import { LRUCache } from '../utils/LRUCache.js'
 
@@ -359,7 +359,6 @@ class ChatService {
   private readonly messageCacheService: MessageCacheService
   private readonly sessionStatsCacheService: SessionStatsCacheService
   private readonly groupMyMessageCountCacheService: GroupMyMessageCountCacheService
-  private readonly imageDecryptService: ImageDecryptService
   private voiceWavCache: LRUCache<string, Buffer>
   private voiceTranscriptCache: LRUCache<string, string>
   private voiceTranscriptPending = new Map<string, Promise<{ success: boolean; transcript?: string; error?: string }>>()
@@ -448,7 +447,6 @@ class ChatService {
     this.messageCacheService = new MessageCacheService(this.configService.getCacheBasePath())
     this.sessionStatsCacheService = new SessionStatsCacheService(this.configService.getCacheBasePath())
     this.groupMyMessageCountCacheService = new GroupMyMessageCountCacheService(this.configService.getCacheBasePath())
-    this.imageDecryptService = new ImageDecryptService()
     // 初始化LRU缓存，限制大小防止内存泄漏
     this.voiceWavCache = new LRUCache(this.voiceWavCacheMaxEntries)
     this.voiceTranscriptCache = new LRUCache(1000) // 最多缓存1000条转写记录
@@ -2371,7 +2369,7 @@ class ChatService {
             console.error(`[ChatService] 跳过消息超过最大尝试次数: attempts=${attempts}`)
           }
           state.fetched = offset
-          console.log(`[ChatService] 跳过完成: skipped=${skipped}, fetched=${state.fetched}, buffered=${state.bufferedMessages?.length || 0}`)
+          this.chatServiceLog(`跳过完成: skipped=${skipped}, fetched=${state.fetched}, buffered=${state.bufferedMessages?.length || 0}`)
         }
       }
 
@@ -2404,8 +2402,8 @@ class ChatService {
       if (offset === 0 && startTime === 0 && endTime === 0) {
         this.markSyntheticUnreadRead(sessionId, filtered)
       }
-      console.log(
-        `[ChatService] getMessages session=${sessionId} rawRowsConsumed=${rawRowsConsumed} visibleMessagesReturned=${filtered.length} filteredOut=${collected.filteredOut || 0} nextOffset=${state.fetched} hasMore=${hasMore}`
+      this.chatServiceLog(
+        `getMessages session=${sessionId} rawRowsConsumed=${rawRowsConsumed} visibleMessagesReturned=${filtered.length} filteredOut=${collected.filteredOut || 0} nextOffset=${state.fetched} hasMore=${hasMore}`
       )
       return { success: true, messages: filtered, hasMore, nextOffset: state.fetched }
     } catch (e) {
@@ -2569,8 +2567,8 @@ class ChatService {
         return { success: false, error: stableResult.error || '获取最新消息失败' }
       }
 
-      console.log(
-        `[ChatService] getLatestMessages(stable) session=${sessionId} rawRows=${stableResult.rawRows || 0} visibleMessagesReturned=${stableResult.messages.length} filteredOut=${stableResult.filteredOut || 0} nextOffset=${stableResult.nextOffset || 0} hasMore=${stableResult.hasMore === true}`
+      this.chatServiceLog(
+        `getLatestMessages(stable) session=${sessionId} rawRows=${stableResult.rawRows || 0} visibleMessagesReturned=${stableResult.messages.length} filteredOut=${stableResult.filteredOut || 0} nextOffset=${stableResult.nextOffset || 0} hasMore=${stableResult.hasMore === true}`
       )
       return {
         success: true,
@@ -5822,6 +5820,19 @@ class ChatService {
     return this.configService.get('chatQuoteDebugLogEnabled') === true
   }
 
+  private shouldLogChatServiceVerbose(): boolean {
+    return this.configService.get('logEnabled') === true
+  }
+
+  private chatServiceLog(message: string, meta?: unknown): void {
+    if (!this.shouldLogChatServiceVerbose()) return
+    if (meta !== undefined) {
+      console.log(`[ChatService] ${message}`, meta)
+    } else {
+      console.log(`[ChatService] ${message}`)
+    }
+  }
+
   private debugQuoteLog(message: string, meta?: unknown): void {
     if (!this.isChatQuoteDebugEnabled()) return
     if (meta !== undefined) {
@@ -8120,7 +8131,7 @@ class ChatService {
       }
 
       // 2. 使用 imageDecryptService 解密图片（仅使用真实图片标识）
-      const result = await this.imageDecryptService.decryptImage({
+      const result = await imageDecryptService.decryptImage({
         sessionId,
         imageMd5,
         imageOriginSourceMd5,
@@ -8959,7 +8970,7 @@ class ChatService {
         return true
       })
 
-      console.log(`[ChatService] 共找到 ${allVoiceMessages.length} 条语音消息（去重后）`)
+      this.chatServiceLog(`共找到 ${allVoiceMessages.length} 条语音消息（去重后）`)
       return { success: true, messages: allVoiceMessages }
     } catch (e) {
       console.error('[ChatService] 获取所有语音消息失败:', e)
@@ -9009,7 +9020,7 @@ class ChatService {
         return true
       })
 
-      console.log(`[ChatService] 共找到 ${allImages.length} 条图片消息（去重后）`)
+      this.chatServiceLog(`共找到 ${allImages.length} 条图片消息（去重后）`)
       return { success: true, images: allImages }
     } catch (e) {
       console.error('[ChatService] 获取全部图片消息失败:', e)
@@ -9177,7 +9188,7 @@ class ChatService {
 
       const dates = result.dates || []
 
-      console.log(`[ChatService] 会话 ${sessionId} 共有 ${dates.length} 个有消息的日期`)
+      this.chatServiceLog(`会话 ${sessionId} 共有 ${dates.length} 个有消息的日期`)
       return { success: true, dates }
     } catch (e) {
       console.error('[ChatService] 获取消息日期失败:', e)
@@ -9198,7 +9209,7 @@ class ChatService {
       }
       const counts = result.counts
 
-      console.log(`[ChatService] 会话 ${sessionId} 获取到 ${Object.keys(counts).length} 个日期的消息计数`)
+      this.chatServiceLog(`会话 ${sessionId} 获取到 ${Object.keys(counts).length} 个日期的消息计数`)
       return { success: true, counts }
     } catch (error) {
       console.error('[ChatService] 获取每日消息数失败:', error)

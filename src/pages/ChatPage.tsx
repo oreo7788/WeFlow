@@ -31,7 +31,24 @@ import {
 } from '../services/exportBridge'
 import ChatHeader from './Chat/ChatHeader'
 import ChatMessageBubble from './Chat/ChatMessageBubble'
+import {
+  BYTES_PER_MEGABYTE,
+  EMOJI_CACHE_MAX_BYTES,
+  EMOJI_CACHE_MAX_ENTRIES,
+  IMAGE_CACHE_MAX_BYTES,
+  IMAGE_CACHE_MAX_ENTRIES,
+  SENDER_AVATAR_CACHE_MAX_ENTRIES,
+  VOICE_CACHE_MAX_BYTES,
+  VOICE_CACHE_MAX_ENTRIES,
+  VOICE_TRANSCRIPT_CACHE_MAX_BYTES,
+  VOICE_TRANSCRIPT_CACHE_MAX_ENTRIES,
+  createBoundedCache,
+  enqueueAutoMediaTask,
+  estimateStringBytes,
+  scheduleWhenIdle
+} from './Chat/chatPageCacheUtils'
 import { runHardlinkPreloadIfNeeded } from '../utils/runHardlinkPreload'
+import { collectImageHardlinkMd5s } from '../utils/collectImageHardlinkMd5s'
 import '../styles/batchTranscribe.scss'
 import './ChatPage.scss'
 
@@ -93,151 +110,6 @@ const MESSAGE_HISTORY_HEAVY_UNREAD_INITIAL_LIMIT = 70
 const MESSAGE_HISTORY_GROWTH_STEP = 20
 const MESSAGE_HISTORY_MAX_LIMIT = 180
 const MESSAGE_VIRTUAL_OVERSCAN_PX = 140
-const BYTES_PER_MEGABYTE = 1024 * 1024
-const EMOJI_CACHE_MAX_ENTRIES = 260
-const EMOJI_CACHE_MAX_BYTES = 32 * BYTES_PER_MEGABYTE
-const IMAGE_CACHE_MAX_ENTRIES = 360
-const IMAGE_CACHE_MAX_BYTES = 64 * BYTES_PER_MEGABYTE
-const VOICE_CACHE_MAX_ENTRIES = 120
-const VOICE_CACHE_MAX_BYTES = 24 * BYTES_PER_MEGABYTE
-const VOICE_TRANSCRIPT_CACHE_MAX_ENTRIES = 1800
-const VOICE_TRANSCRIPT_CACHE_MAX_BYTES = 2 * BYTES_PER_MEGABYTE
-const SENDER_AVATAR_CACHE_MAX_ENTRIES = 2000
-const AUTO_MEDIA_TASK_MAX_CONCURRENCY = 2
-const AUTO_MEDIA_TASK_MAX_QUEUE = 80
-
-type RequestIdleCallbackCompat = (callback: () => void, options?: { timeout?: number }) => number
-
-type BoundedCacheOptions<V> = {
-  maxEntries: number
-  maxBytes?: number
-  estimate?: (value: V) => number
-}
-
-type BoundedCache<V> = {
-  get: (key: string) => V | undefined
-  set: (key: string, value: V) => void
-  has: (key: string) => boolean
-  delete: (key: string) => boolean
-  clear: () => void
-  readonly size: number
-}
-
-function estimateStringBytes(value: string): number {
-  return Math.max(0, value.length * 2)
-}
-
-function createBoundedCache<V>(options: BoundedCacheOptions<V>): BoundedCache<V> {
-  const { maxEntries, maxBytes, estimate } = options
-  const storage = new Map<string, V>()
-  const valueSizes = new Map<string, number>()
-  let currentBytes = 0
-
-  const estimateSize = (value: V): number => {
-    if (!estimate) return 1
-    const raw = estimate(value)
-    if (!Number.isFinite(raw) || raw <= 0) return 1
-    return Math.max(1, Math.round(raw))
-  }
-
-  const removeKey = (key: string): boolean => {
-    if (!storage.has(key)) return false
-    const previousSize = valueSizes.get(key) || 0
-    currentBytes = Math.max(0, currentBytes - previousSize)
-    valueSizes.delete(key)
-    return storage.delete(key)
-  }
-
-  const touch = (key: string, value: V) => {
-    storage.delete(key)
-    storage.set(key, value)
-  }
-
-  const prune = () => {
-    const shouldPruneByBytes = Number.isFinite(maxBytes) && (maxBytes as number) > 0
-    while (storage.size > maxEntries || (shouldPruneByBytes && currentBytes > (maxBytes as number))) {
-      const oldestKey = storage.keys().next().value as string | undefined
-      if (!oldestKey) break
-      removeKey(oldestKey)
-    }
-  }
-
-  return {
-    get(key: string) {
-      const value = storage.get(key)
-      if (value === undefined) return undefined
-      touch(key, value)
-      return value
-    },
-    set(key: string, value: V) {
-      const nextSize = estimateSize(value)
-      if (storage.has(key)) {
-        const previousSize = valueSizes.get(key) || 0
-        currentBytes = Math.max(0, currentBytes - previousSize)
-      }
-      storage.set(key, value)
-      valueSizes.set(key, nextSize)
-      currentBytes += nextSize
-      prune()
-    },
-    has(key: string) {
-      return storage.has(key)
-    },
-    delete(key: string) {
-      return removeKey(key)
-    },
-    clear() {
-      storage.clear()
-      valueSizes.clear()
-      currentBytes = 0
-    },
-    get size() {
-      return storage.size
-    }
-  }
-}
-
-const autoMediaTaskQueue: Array<() => void> = []
-let autoMediaTaskRunningCount = 0
-
-function enqueueAutoMediaTask<T>(task: () => Promise<T>): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const runTask = () => {
-      autoMediaTaskRunningCount += 1
-      task()
-        .then(resolve)
-        .catch(reject)
-        .finally(() => {
-          autoMediaTaskRunningCount = Math.max(0, autoMediaTaskRunningCount - 1)
-          const next = autoMediaTaskQueue.shift()
-          if (next) next()
-        })
-    }
-
-    if (autoMediaTaskRunningCount < AUTO_MEDIA_TASK_MAX_CONCURRENCY) {
-      runTask()
-      return
-    }
-    if (autoMediaTaskQueue.length >= AUTO_MEDIA_TASK_MAX_QUEUE) {
-      reject(new Error('AUTO_MEDIA_TASK_QUEUE_FULL'))
-      return
-    }
-    autoMediaTaskQueue.push(runTask)
-  })
-}
-
-function scheduleWhenIdle(task: () => void, options?: { timeout?: number; fallbackDelay?: number }): void {
-  const requestIdleCallbackFn = (
-    globalThis as typeof globalThis & { requestIdleCallback?: RequestIdleCallbackCompat }
-  ).requestIdleCallback
-
-  if (typeof requestIdleCallbackFn === 'function') {
-    requestIdleCallbackFn(task, options?.timeout !== undefined ? { timeout: options.timeout } : undefined)
-    return
-  }
-
-  window.setTimeout(task, options?.fallbackDelay ?? 0)
-}
 
 function isGlobalMsgSearchCanceled(error: unknown): boolean {
   return String(error || '') === GLOBAL_MSG_SEARCH_CANCELED_ERROR
@@ -6450,25 +6322,8 @@ function ChatPage(props: ChatPageProps) {
     })
     updateDecryptTaskStatus('正在准备批量图片解密任务...', `0 / ${totalImages}`, 'running')
 
-    const hardlinkMd5Set = new Set<string>()
-    for (const img of images) {
-      const imageMd5 = String(img.imageMd5 || '').trim().toLowerCase()
-      if (imageMd5) {
-        hardlinkMd5Set.add(imageMd5)
-      }
-      const imageOriginSourceMd5 = String(img.imageOriginSourceMd5 || '').trim().toLowerCase()
-      if (imageOriginSourceMd5) {
-        hardlinkMd5Set.add(imageOriginSourceMd5)
-      }
-      if (imageMd5 || imageOriginSourceMd5) {
-        continue
-      }
-      const imageDatName = String(img.imageDatName || '').trim().toLowerCase()
-      if (/^[a-f0-9]{32}$/i.test(imageDatName)) {
-        hardlinkMd5Set.add(imageDatName)
-      }
-    }
-    if (hardlinkMd5Set.size > 0) {
+    const hardlinkMd5List = collectImageHardlinkMd5s(images)
+    if (hardlinkMd5List.length > 0) {
       await waitIfPaused()
       if (controlState.cancelRequested) {
         const remaining = Math.max(0, totalImages - completed)
@@ -6480,7 +6335,7 @@ function ChatPage(props: ChatPageProps) {
         return
       }
       await runHardlinkPreloadIfNeeded(
-        Array.from(hardlinkMd5Set),
+        hardlinkMd5List,
         (detail) => updateDecryptTaskStatus(detail, `0 / ${totalImages}`)
       )
       await waitIfPaused()

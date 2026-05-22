@@ -1,7 +1,7 @@
 import { join, dirname } from 'path'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs'
-import { app } from 'electron'
 import { ConfigService } from './config'
+import { createDebouncedFilePersist } from '../utils/debouncedFilePersist'
 
 export interface ContactCacheEntry {
   displayName?: string
@@ -12,6 +12,7 @@ export interface ContactCacheEntry {
 export class ContactCacheService {
   private readonly cacheFilePath: string
   private cache: Record<string, ContactCacheEntry> = {}
+  private readonly persistDebounced = createDebouncedFilePersist(() => this.writeCacheToDisk())
 
   constructor(cacheBasePath?: string) {
     const basePath = cacheBasePath && cacheBasePath.trim().length > 0
@@ -74,7 +75,7 @@ export class ContactCacheService {
     }
   }
 
-  private persist() {
+  private writeCacheToDisk() {
     try {
       writeFileSync(this.cacheFilePath, JSON.stringify(this.cache), 'utf8')
     } catch (error) {
@@ -82,7 +83,12 @@ export class ContactCacheService {
     }
   }
 
+  private persist() {
+    this.persistDebounced.schedule()
+  }
+
   clear(): void {
+    this.persistDebounced.cancel()
     this.cache = {}
     try {
       rmSync(this.cacheFilePath, { force: true })

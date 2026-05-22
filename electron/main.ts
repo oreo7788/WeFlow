@@ -11,6 +11,7 @@ import { dbPathService } from './services/dbPathService'
 import { wcdbService } from './services/wcdbService'
 import { chatService } from './services/chatService'
 import { imageDecryptService } from './services/imageDecryptService'
+import { logOptionalError } from './utils/logOptionalError'
 import { imagePreloadService } from './services/imagePreloadService'
 import { analyticsService } from './services/analyticsService'
 import { groupAnalyticsService } from './services/groupAnalyticsService'
@@ -3121,7 +3122,7 @@ function registerIpcHandlers() {
   })
 
   // 导出相关
-  ipcMain.handle('export:getExportStats', async (_, sessionIds: string[], options: any) => {
+  ipcMain.handle('export:getExportStats', async (_, sessionIds: string[], options: ExportOptions) => {
     return exportService.getExportStats(sessionIds, options)
   })
 
@@ -4361,7 +4362,10 @@ const shutdownAppServices = async (): Promise<void> => {
   shutdownPromise = (async () => {
     isAppQuitting = true
     // 销毁 tray 图标
-    if (tray) { try { tray.destroy() } catch {} tray = null }
+    if (tray) {
+      try { tray.destroy() } catch (error) { logOptionalError('App.shutdown.tray', error) }
+      tray = null
+    }
     // 通知窗使用 hide 而非 close，退出时主动销毁，避免残留窗口阻塞进程退出。
     destroyNotificationWindow()
     messagePushService.stop()
@@ -4372,15 +4376,15 @@ const shutdownAppServices = async (): Promise<void> => {
       app.exit(0)
     }, 5000)
     forceExitTimer.unref()
-    try { await cloudControlService.stop() } catch {}
+    try { await cloudControlService.stop() } catch (error) { logOptionalError('App.shutdown.cloudControl', error) }
     // 停止自动下载服务
-    try { await imageDownloadService.stopAutoDownload() } catch {}
+    try { await imageDownloadService.stopAutoDownload() } catch (error) { logOptionalError('App.shutdown.imageDownload', error) }
     // 停止 chatService（内部会关闭 cursor 与 DB），避免退出阶段仍触发监控回调
-    try { chatService.close() } catch {}
+    try { chatService.close() } catch (error) { logOptionalError('App.shutdown.chatService', error) }
     // 停止 HTTP 服务器，释放 TCP 端口占用，避免进程无法退出
-    try { await httpService.stop() } catch {}
+    try { await httpService.stop() } catch (error) { logOptionalError('App.shutdown.httpService', error) }
     // 终止 wcdb Worker 线程，避免线程阻止进程退出
-    try { await wcdbService.shutdown() } catch {}
+    try { await wcdbService.shutdown() } catch (error) { logOptionalError('App.shutdown.wcdbService', error) }
   })()
   return shutdownPromise
 }

@@ -3,6 +3,7 @@ import { Calendar, Image as ImageIcon, Info, Loader2, PlayCircle, RefreshCw, Tra
 import { VirtuosoGrid } from 'react-virtuoso'
 import { finishBackgroundTask, registerBackgroundTask, updateBackgroundTask } from '../services/backgroundTaskMonitor'
 import { runHardlinkPreloadIfNeeded } from '../utils/runHardlinkPreload'
+import { collectImageHardlinkMd5s } from '../utils/collectImageHardlinkMd5s'
 import './ResourcesPage.scss'
 
 type MediaTab = 'image' | 'video'
@@ -1169,6 +1170,12 @@ function ResourcesPage() {
     }
   }, [isLikelyThumbnailPreview, showAlert])
 
+  const openImageViewerWithPath = useCallback(async (localPath: string) => {
+    const renderPath = toRenderableMediaSrc(localPath)
+    if (!renderPath) return
+    await window.electronAPI.window.openImageViewerWindow(renderPath)
+  }, [])
+
   const onImagePreviewAction = useCallback(async (item: MediaStreamItem) => {
     if (item.mediaType !== 'image') return
     const key = getItemKey(item)
@@ -1191,7 +1198,7 @@ function ResourcesPage() {
         // ignore
       }
       if (localPath) {
-        await window.electronAPI.window.openImageViewerWindow(localPath)
+        await openImageViewerWithPath(localPath)
         return
       }
     }
@@ -1207,15 +1214,18 @@ function ResourcesPage() {
       if (resolved?.success && resolved.localPath) {
         localPath = resolved.localPath
         queuePreviewPatch(key, localPath, Boolean(resolved.hasUpdate))
-        await window.electronAPI.window.openImageViewerWindow(localPath)
+        await openImageViewerWithPath(localPath)
         return
       }
     } catch {
       // ignore
     }
 
-    await decryptImage(item)
-  }, [decryptImage, queuePreviewPatch])
+    const decryptedPath = await decryptImage(item)
+    if (decryptedPath) {
+      await openImageViewerWithPath(decryptedPath)
+    }
+  }, [decryptImage, openImageViewerWithPath, queuePreviewPatch])
 
   const updateImageQuality = useCallback(async (item: MediaStreamItem) => {
     await decryptImage(item)
@@ -1261,21 +1271,18 @@ function ResourcesPage() {
         lastProgressBucket = bucket
         lastProgressUpdateAt = now
       }
-      const hardlinkMd5Set = new Set<string>()
-      for (const item of imageItems) {
-        if (!hasImageLocator(item)) continue
-        const imageMd5 = normalizeMediaToken(item.imageMd5)
-        if (imageMd5) hardlinkMd5Set.add(imageMd5)
-        const imageOriginSourceMd5 = getImageOriginSourceMd5(item)
-        if (imageOriginSourceMd5) hardlinkMd5Set.add(imageOriginSourceMd5)
-        const imageDatName = getSafeImageDatName(item)
-        if (/^[a-f0-9]{32}$/i.test(imageDatName)) {
-          hardlinkMd5Set.add(imageDatName)
-        }
-      }
-      if (hardlinkMd5Set.size > 0) {
+      const hardlinkMd5List = collectImageHardlinkMd5s(
+        imageItems
+          .filter(hasImageLocator)
+          .map((item) => ({
+            imageMd5: normalizeMediaToken(item.imageMd5),
+            imageOriginSourceMd5: getImageOriginSourceMd5(item),
+            imageDatName: getSafeImageDatName(item)
+          }))
+      )
+      if (hardlinkMd5List.length > 0) {
         await runHardlinkPreloadIfNeeded(
-          Array.from(hardlinkMd5Set),
+          hardlinkMd5List,
           (detail) => updateBackgroundTask(taskId, { detail })
         )
       }

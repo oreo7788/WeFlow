@@ -238,7 +238,16 @@ export interface ElectronAPI {
     click: (payload: string | { sessionId?: string; channel?: string; insightRecordId?: string; targetRoute?: string }) => void
     ready: () => void
     resize: (width: number, height: number) => void
-    onShow: (callback: (event: any, data: any) => void) => () => void
+    onShow: (callback: (event: unknown, data: {
+      title: string
+      content: string
+      avatarUrl?: string
+      sessionId: string
+      channel?: string
+      insightRecordId?: string
+      targetRoute?: string
+      position?: string
+    }) => void) => () => void
     onNavigateToSession: (callback: (sessionId: string) => void) => () => void
     onNavigateToRoute: (callback: (route: string) => void) => () => void
   }
@@ -246,7 +255,7 @@ export interface ElectronAPI {
     getPath: () => Promise<string>
     read: () => Promise<{ success: boolean; content?: string; error?: string }>
     clear: () => Promise<{ success: boolean; error?: string }>
-    debug: (data: any) => void
+    debug: (data: unknown) => void
   }
   diagnostics: {
     getExportCardLogs: (options?: { limit?: number }) => Promise<{
@@ -671,7 +680,7 @@ export interface ElectronAPI {
       filePath?: string
       error?: string
     }>
-    onWcdbChange: (callback: (event: any, data: { type: string; json: string }) => void) => () => void
+    onWcdbChange: (callback: (event: unknown, data: { type: string; json: string }) => void) => () => void
   }
   biz: {
     listAccounts: (account?: string) => Promise<any[]>
@@ -1165,7 +1174,7 @@ export interface ElectronAPI {
     onProgress: (callback: (payload: { status: string; progress: number }) => void) => () => void
   }
   export: {
-    getExportStats: (sessionIds: string[], options: any) => Promise<{
+    getExportStats: (sessionIds: string[], options: ExportOptions) => Promise<{
       totalMessages: number
       voiceMessages: number
       cachedVoiceCount: number
@@ -1249,9 +1258,9 @@ export interface ElectronAPI {
       }>
       error?: string
     }>
-    debugResource: (url: string) => Promise<{ success: boolean; status?: number; headers?: any; error?: string }>
+    debugResource: (url: string) => Promise<{ success: boolean; status?: number; headers?: Record<string, string>; error?: string }>
     proxyImage: (payload: { url: string; key?: string | number }) => Promise<{ success: boolean; dataUrl?: string; videoPath?: string; error?: string }>
-    downloadImage: (payload: { url: string; key?: string | number }) => Promise<{ success: boolean; data?: any; contentType?: string; error?: string }>
+    downloadImage: (payload: { url: string; key?: string | number }) => Promise<{ success: boolean; data?: Uint8Array; contentType?: string; error?: string }>
     exportTimeline: (options: {
       outputDir: string
       format: 'json' | 'html' | 'arkmejson'

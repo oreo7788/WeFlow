@@ -10,6 +10,8 @@ import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
 import { imageDecryptService } from './imageDecryptService'
 import { runHardlinkPreloadIfNeeded } from '../utils/runHardlinkPreload'
+import { collectImageHardlinkMd5s } from '../utils/collectImageHardlinkMd5s'
+import { logOptionalError } from '../utils/logOptionalError'
 import { chatService } from './chatService'
 import { videoService } from './videoService'
 import { voiceTranscribeService } from './voiceTranscribeService'
@@ -4409,34 +4411,22 @@ class ExportService {
   ): Promise<void> {
     if (!Array.isArray(messages) || messages.length === 0) return
 
-    const md5Pattern = /^[a-f0-9]{32}$/i
-    const imageMd5Set = new Set<string>()
-
+    const imageSources: any[] = []
     let scanIndex = 0
     for (const msg of messages) {
       if ((scanIndex++ & 0x7f) === 0) {
         this.throwIfStopRequested(control)
       }
-
       if (options.exportImages && msg?.localType === 3) {
-        const imageMd5 = String(msg?.imageMd5 || '').trim().toLowerCase()
-        if (imageMd5) {
-          imageMd5Set.add(imageMd5)
-        }
-        const imageOriginSourceMd5 = String(msg?.imageOriginSourceMd5 || '').trim().toLowerCase()
-        if (imageOriginSourceMd5) {
-          imageMd5Set.add(imageOriginSourceMd5)
-        }
-        const imageDatName = String(msg?.imageDatName || '').trim().toLowerCase()
-        if (md5Pattern.test(imageDatName)) {
-          imageMd5Set.add(imageDatName)
-        }
+        imageSources.push(msg)
       }
-
     }
 
-    if (imageMd5Set.size > 0) {
-      await runHardlinkPreloadIfNeeded(Array.from(imageMd5Set)).catch(() => { })
+    const imageMd5List = collectImageHardlinkMd5s(imageSources)
+    if (imageMd5List.length > 0) {
+      await runHardlinkPreloadIfNeeded(imageMd5List).catch((error) => {
+        logOptionalError('ExportService.preloadHardlink', error)
+      })
     }
     this.throwIfStopRequested(control)
   }
