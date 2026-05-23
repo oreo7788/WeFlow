@@ -1,4 +1,3 @@
-// @ts-nocheck
 import * as fs from 'fs'
 import * as path from 'path'
 import type { ExportWriterHost } from './exportWriterContext'
@@ -8,14 +7,18 @@ import {
   type ChatLabExport,
   type ChatLabMember,
   type ChatLabMessage,
+  type ExportAggregatedSessionMetric,
   type ExportDisplayProfile,
   type ExportOptions,
   type ExportProgress,
+  type ExportStatsResult,
+  type ExportStatsSessionSnapshot,
   type ExportTaskControl,
   type MediaExportItem,
 } from './exportServiceTypes'
 import { wcdbService } from './wcdbService'
 import { exportRecordService } from './exportRecordService'
+import { chatService } from './chatService'
 
 type ExportServiceInstance = ExportWriterHost
 
@@ -537,9 +540,9 @@ export const exportSessionsMixin = {
     const cacheKey = this.buildExportStatsCacheKey(normalizedSessionIds, options, conn.cleanedWxid)
     const cachedStats = this.getExportStatsCacheEntry(cacheKey)
     if (cachedStats) {
-      const cachedResult = this.cloneExportStatsResult(cachedStats.result)
+      const cachedResult = this.cloneExportStatsResult(cachedStats.result) as ExportStatsResult
       const orderedSessions: Array<{ sessionId: string; displayName: string; totalCount: number; voiceCount: number }> = []
-      const sessionMap = new Map(cachedResult.sessions.map((item) => [item.sessionId, item] as const))
+      const sessionMap = new Map(cachedResult.sessions.map((item: { sessionId: string; displayName: string; totalCount: number; voiceCount: number }) => [item.sessionId, item] as const))
       for (const sessionId of normalizedSessionIds) {
         const cachedSession = sessionMap.get(sessionId)
         if (cachedSession) orderedSessions.push(cachedSession)
@@ -696,8 +699,9 @@ export const exportSessionsMixin = {
       let latestTimestamp = 0
       let cached = 0
       for (const msg of msgs) {
-        if (msg.createTime > latestTimestamp) {
-          latestTimestamp = msg.createTime
+        const createTime = Number(msg.createTime || 0)
+        if (createTime > latestTimestamp) {
+          latestTimestamp = createTime
         }
         const localType = msg.localType
         if (localType === 34) {

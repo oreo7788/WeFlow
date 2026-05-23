@@ -1,4 +1,3 @@
-// @ts-nocheck
 import * as fs from 'fs'
 import * as path from 'path'
 import type { ExportWriterHost } from './exportWriterContext'
@@ -245,7 +244,8 @@ export const exportJsonMixin = {
         if ((messageIndex++ & 0x7f) === 0) {
           this.throwIfStopRequested(control)
         }
-        const senderInfo = senderInfoMap.get(msg.senderUsername) || { displayName: msg.senderUsername || '' }
+        const senderKey = String(msg.senderUsername || '').trim()
+        const senderInfo = senderInfoMap.get(senderKey) || { displayName: senderKey || '' }
         const sourceMatch = /<msgsource>[\s\S]*?<\/msgsource>/i.exec(msg.content || '')
         const source = sourceMatch ? sourceMatch[0] : ''
 
@@ -269,8 +269,8 @@ export const exportJsonMixin = {
             msg.emojiCaption
           )
         }
-        if (this.isReadableSystemMessage(msg.localType, msg.content)) {
-          content = this.extractReadableSystemMessageText(msg.content) || content
+        if (this.isReadableSystemMessage(msg.localType ?? 0, String(msg.content || ''))) {
+          content = this.extractReadableSystemMessageText(String(msg.content || '')) || content
         }
 
         const quotedReplyDisplay = await this.resolveQuotedReplyDisplayWithNames({
@@ -296,7 +296,7 @@ export const exportJsonMixin = {
         }
 
         // 获取发送者信息用于名称显示
-        const senderWxid = msg.senderUsername
+        const senderWxid = String(msg.senderUsername || '').trim() || cleanedMyWxid
         const contact = senderWxid
           ? (contactCache.get(senderWxid) ?? { success: false as const })
           : { success: false as const }
@@ -384,8 +384,9 @@ export const exportJsonMixin = {
         }
 
         allMessages.push(msgObj)
-        if (msg.createTime < lastCreateTime) needSort = true
-        lastCreateTime = msg.createTime
+        const createTime = Number(msg.createTime || 0)
+        if (createTime < lastCreateTime) needSort = true
+        lastCreateTime = createTime
         if ((allMessages.length % 200) === 0 || allMessages.length === totalMessages) {
           const exportProgress = 55 + Math.floor((allMessages.length / totalMessages) * 15)
           onProgress?.({

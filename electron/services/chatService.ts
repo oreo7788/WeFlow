@@ -4,7 +4,7 @@ import * as path from 'path'
 import * as fs from 'fs'
 import * as crypto from 'crypto'
 import { app, BrowserWindow, dialog } from 'electron'
-import { ConfigService } from './config'
+import { ConfigService, type ConfigSchema } from './config'
 import { resolveAccountDir } from './accountDirResolver'
 import { wcdbService } from './wcdbService'
 import { MessageCacheService } from './messageCacheService'
@@ -303,7 +303,7 @@ class ChatService {
     return {
       ensureConnected: () => this.ensureConnected(),
       getMyWxidCleaned: () => String(this.configService.getMyWxidCleaned() || '').trim(),
-      getConfig: (key: string) => this.configService.get(key),
+      getConfig: (key: keyof ConfigSchema) => this.configService.get(key),
       getSessions: () => this.getSessions(),
       getSessionMessageTables: (sessionId) => this.getSessionMessageTables(sessionId),
       getMessageById: (sessionId, localId) => this.messageQueryService.getMessageById(sessionId, localId),

@@ -107,6 +107,7 @@ function App() {
   const isExportRoute = routeLocation.pathname === '/export'
   const isChatRoute = routeLocation.pathname === '/chat'
   const [chatKeepAliveMounted, setChatKeepAliveMounted] = useState(false)
+  const [exportKeepAliveMounted, setExportKeepAliveMounted] = useState(false)
   const [themeHydrated, setThemeHydrated] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [showCloseDialog, setShowCloseDialog] = useState(false)
@@ -139,6 +140,12 @@ function App() {
       setChatKeepAliveMounted(true)
     }
   }, [isChatRoute])
+
+  useEffect(() => {
+    if (isExportRoute) {
+      setExportKeepAliveMounted(true)
+    }
+  }, [isExportRoute])
 
   useEffect(() => {
     const removeCloseConfirmListener = window.electronAPI.window.onCloseConfirmRequested((payload) => {
@@ -237,6 +244,7 @@ function App() {
     const removeShuttingDownListener = window.electronAPI?.app?.onShuttingDown?.(() => {
       setAutoMediaTasksPaused(true)
       setChatKeepAliveMounted(false)
+      setExportKeepAliveMounted(false)
     })
 
     return () => removeShuttingDownListener?.()
@@ -747,11 +755,13 @@ function App() {
         <Sidebar collapsed={sidebarCollapsed} />
         <main className="content">
           <RouteGuard>
-            <div className={`export-keepalive-page ${isExportRoute ? 'active' : 'hidden'}`} aria-hidden={!isExportRoute}>
-              <LazyPage>
-                <ExportPage />
-              </LazyPage>
-            </div>
+            {exportKeepAliveMounted && (
+              <div className={`export-keepalive-page ${isExportRoute ? 'active' : 'hidden'}`} aria-hidden={!isExportRoute}>
+                <LazyPage>
+                  <ExportPage />
+                </LazyPage>
+              </div>
+            )}
 
             {chatKeepAliveMounted && (
               <div className={`chat-keepalive-page ${isChatRoute ? 'active' : 'hidden'}`} aria-hidden={!isChatRoute}>

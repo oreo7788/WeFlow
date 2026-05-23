@@ -108,6 +108,7 @@ import { exportTxtMixin } from './exportTxtWriter'
 import { exportWeCloneMixin } from './exportWeCloneWriter'
 import { exportHtmlMixin } from './exportHtmlWriter'
 import { exportSessionsMixin } from './exportSessionsWriter'
+import { decodeMessageContent, sanitizeQuotedContent } from './chat/messageParsing'
 export type { ExportOptions, ExportProgress } from './exportServiceTypes'
 
 export class ExportService {
@@ -2129,10 +2130,10 @@ export class ExportService {
         const localType = parseInt(result.value.row.local_type || '0', 10)
         const rawMessageContent = result.value.row.message_content
         const rawCompressContent = result.value.row.compress_content
-        const content = chatService['decodeMessageContent'](rawMessageContent, rawCompressContent)
+        const content = decodeMessageContent(rawMessageContent, rawCompressContent)
 
         if (localType === 1) {
-          msg.quotedContent = chatService['sanitizeQuotedContent'](content)
+          msg.quotedContent = sanitizeQuotedContent(content)
         } else if (localType === 3) {
           msg.quotedContent = '[图片]'
         } else if (localType === 34) {
@@ -3171,6 +3172,7 @@ export class ExportService {
       await this.ensureExportDir(videosDir, control, dirCache)
 
       const sourcePath = videoInfo.videoUrl
+      if (!sourcePath) return null
       const fileName = path.basename(sourcePath)
       const destPath = path.join(videosDir, fileName)
 
@@ -4199,7 +4201,7 @@ export class ExportService {
             emojiMd5 = normalizeEmojiMd5(row.emoji_md5 || row.emojiMd5) || undefined
             const packedInfoRaw = String(row.packed_info || row.packedInfo || row.PackedInfo || '')
             const reserved0Raw = String(row.reserved0 || row.Reserved0 || '')
-            const supplementalPayload = `${decodeMaybeCompressed(packedInfoRaw)}\n${decodeMaybeCompressed(reserved0Raw)}`
+            const supplementalPayload = `${this.decodeMaybeCompressed(packedInfoRaw)}\n${this.decodeMaybeCompressed(reserved0Raw)}`
             if (content) {
               emojiCdnUrl = emojiCdnUrl || this.extractEmojiUrl(content)
               emojiMd5 = emojiMd5 || normalizeEmojiMd5(this.extractEmojiMd5(content))
@@ -4220,7 +4222,7 @@ export class ExportService {
             fileMd5 = rowFileHints.fileMd5
 
             if (content && (isFileAppLocalType(localType) || allowFileProbe || hasFileAppMessageHints({ xmlType, fileName, fileSize, fileExt, fileMd5 }))) {
-              const fileMeta = extractFileAppMessageMeta(content)
+              const fileMeta = this.extractFileAppMessageMeta(content)
               if (fileMeta) {
                 xmlType = fileMeta.xmlType || xmlType
                 fileName = fileMeta.fileName || fileName
@@ -4473,7 +4475,7 @@ export class ExportService {
         const content = this.decodeMessageContent(rawMessageContent, rawCompressContent)
         const packedInfoRaw = getRowField(row, ['packed_info', 'packedInfo', 'PackedInfo', 'WCDB_CT_packed_info']) ?? ''
         const reserved0Raw = getRowField(row, ['reserved0', 'Reserved0', 'WCDB_CT_Reserved0']) ?? ''
-        const supplementalPayload = `${decodeMaybeCompressed(String(packedInfoRaw || ''))}\n${decodeMaybeCompressed(String(reserved0Raw || ''))}`
+        const supplementalPayload = `${this.decodeMaybeCompressed(String(packedInfoRaw || ''))}\n${this.decodeMaybeCompressed(String(reserved0Raw || ''))}`
 
         if (msg.localType === 3) {
           const imageMd5 = (String(row.image_md5 || row.imageMd5 || '').trim() || this.extractImageMd5(content) || '').toLowerCase()
@@ -4508,7 +4510,7 @@ export class ExportService {
 
         if (isFileAppLocalType(Number(msg.localType || 0)) || hasFileAppMessageHints(msg)) {
           const rowFileHints = getFileAppMessageHints(row)
-          const fileMeta = extractFileAppMessageMeta(content)
+          const fileMeta = this.extractFileAppMessageMeta(content)
           const mergedFileMeta = {
             xmlType: fileMeta?.xmlType || rowFileHints.xmlType,
             fileName: fileMeta?.fileName || rowFileHints.fileName,
@@ -5448,7 +5450,7 @@ export class ExportService {
     emojiCaption?: string
   ): string {
     if (!content && localType === 47) {
-      return this.formatEmojiSemanticText(emojiCaption)
+      return formatEmojiSemanticText(emojiCaption)
     }
     if (!content) return ''
 
@@ -5467,24 +5469,6 @@ export class ExportService {
 
     return this.formatPlainExportContent(content, localType, { exportVoiceAsText: false }, undefined, myWxid, senderWxid, isSend, emojiCaption)
   }
-
-
-  private looksLikeBase64(s: string): boolean {
-    if (s.length % 4 !== 0) return false
-    return /^[A-Za-z0-9+/=]+$/.test(s)
-  }
-
-  /**
-   * 解析消息内容为可读文本
-   * 注意：语音消息在这里返回占位符，实际转文字在导出时异步处理
-   */
-
-  private normalizeGroupNicknameIdentity(value: string): string {
-    const raw = String(value || '').trim()
-    if (!raw) return ''
-    return raw.toLowerCase()
-  }
-
 
   private buildExportStatsCacheKey(sessionIds: string[], options: Pick<ExportOptions, 'dateRange' | 'senderUsername'>, cleanedWxid?: string): string {
     return this.exportStatsCacheManager.buildExportStatsCacheKey(sessionIds, options, cleanedWxid)

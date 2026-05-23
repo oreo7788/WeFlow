@@ -111,16 +111,14 @@ export class BizService {
         const sessionsRes = await chatService.getSessions()
         if (sessionsRes.success && sessionsRes.sessions) {
           for (const session of sessionsRes.sessions) {
-            const uname = session.username || session.strUsrName || session.userName || session.id
-            // 适配日志中发现的字段，注意转为整型数字
-            const timeStr = session.lastTimestamp || session.sortTimestamp || session.last_timestamp || session.sort_timestamp || session.nTime || session.timestamp || '0'
-            const time = parseInt(timeStr.toString(), 10)
+            const uname = session.username
+            const time = Number(session.lastTimestamp || session.sortTimestamp || 0)
 
             if (usernames.includes(uname) && time > 0) {
               bizLatestTime[uname] = time
             }
             if (usernames.includes(uname)) {
-              const unread = Number(session.unreadCount ?? session.unread_count ?? 0)
+              const unread = Number(session.unreadCount ?? 0)
               bizUnreadCount[uname] = Number.isFinite(unread) ? Math.max(0, Math.floor(unread)) : 0
             }
           }

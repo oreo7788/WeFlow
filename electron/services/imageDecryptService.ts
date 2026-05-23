@@ -814,7 +814,7 @@ export class ImageDecryptService {
   }
 
   private async tryPromoteThumbnailCache(
-    payload: { sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number; preferFilePath?: boolean },
+    payload: { sessionId?: string; imageMd5?: string; imageOriginSourceMd5?: string; imageDatName?: string; createTime?: number; preferFilePath?: boolean },
     cacheKey: string,
     cachedPath: string
   ): Promise<string | null> {
@@ -1796,7 +1796,7 @@ export class ImageDecryptService {
     if (aesData.length > 0) {
       const decipher = crypto.createDecipheriv('aes-128-ecb', aesKey, Buffer.alloc(0))
       decipher.setAutoPadding(false)
-      plainAes = this.strictRemovePkcs7Padding(Buffer.concat([decipher.update(aesData), decipher.final()]))
+      plainAes = Buffer.from(this.strictRemovePkcs7Padding(Buffer.concat([decipher.update(aesData), decipher.final()])))
     }
 
     const remaining = payload.subarray(alignedAesSize)
@@ -1807,14 +1807,14 @@ export class ImageDecryptService {
     if (xorSize > 0) {
       const rawLength = remaining.length - xorSize
       if (rawLength < 0) throw new Error('invalid raw size')
-      rawData = remaining.subarray(0, rawLength)
+      rawData = Buffer.from(remaining.subarray(0, rawLength))
       const xorData = remaining.subarray(rawLength)
       decodedXor = Buffer.allocUnsafe(xorData.length)
       for (let i = 0; i < xorData.length; i += 1) {
         decodedXor[i] = xorData[i] ^ xorKey
       }
     } else {
-      rawData = remaining
+      rawData = Buffer.from(remaining)
     }
     return Buffer.concat([plainAes, rawData, decodedXor])
   }
@@ -1840,7 +1840,7 @@ export class ImageDecryptService {
     for (let i = data.length - pad; i < data.length; i += 1) {
       if (data[i] !== pad) throw new Error('invalid pkcs7 padding')
     }
-    return data.subarray(0, data.length - pad)
+    return Buffer.from(data.subarray(0, data.length - pad))
   }
 
   private detectImageExtension(buffer: Buffer): string | null {

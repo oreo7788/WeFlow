@@ -105,13 +105,14 @@ export class ImageDownloadService {
       await this.unhook()
     }
 
-    this.lastWhitelist = whitelist
+    const normalizedWhitelist = Array.isArray(whitelist) ? whitelist : [whitelist].filter(Boolean)
+    this.lastWhitelist = normalizedWhitelist
 
     if (!this.pollTimer) {
       this.pollTimer = setInterval(() => this.checkAndHook(this.lastWhitelist, false), 30000)
     }
 
-    return await this.checkAndHook(whitelist, true)
+    return await this.checkAndHook(normalizedWhitelist, true)
   }
 
   async stopAutoDownload() {

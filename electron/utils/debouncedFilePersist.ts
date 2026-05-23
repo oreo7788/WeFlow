@@ -1,6 +1,7 @@
 export function createDebouncedFilePersist(write: () => void, delayMs = 500): {
   schedule: () => void
   flush: () => void
+  cancel: () => void
 } {
   let timer: ReturnType<typeof setTimeout> | null = null
 

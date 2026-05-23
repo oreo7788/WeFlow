@@ -10,7 +10,7 @@ export interface MyFootprintHost {
   parseMessage(row: any, options?: { source?: 'search' | 'detail'; sessionId?: string }): Promise<Message>
   enrichSessionsContactInfo(
     usernames: string[],
-    options?: { lite?: boolean }
+    options?: { skipDisplayName?: boolean; onlyMissingAvatar?: boolean }
   ): Promise<{ success: boolean; contacts?: Record<string, { displayName?: string; avatarUrl?: string }>; error?: string }>
   quoteSqlIdentifier(identifier: string): string
   getSessionLocalType(row: Record<string, unknown>): number | undefined

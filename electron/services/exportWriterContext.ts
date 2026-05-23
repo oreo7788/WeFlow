@@ -1,4 +1,7 @@
 import type {
+  ExportCollectResult,
+  ExportCollectedRow,
+  ExportDisplayProfile,
   ExportOptions,
   ExportProgress,
   ExportTaskControl,
@@ -16,9 +19,10 @@ export interface ExportWriterHost {
   buildSessionExportBaseName(...args: any[]): any
   clearMediaRuntimeState(...args: any[]): any
   cloneExportStatsResult(...args: any[]): any
-  collectMediaMessagesForExport(...args: any[]): any
-  collectMessages(...args: any[]): any
+  collectMediaMessagesForExport(messages: ExportCollectedRow[], options: ExportOptions): ExportCollectedRow[]
+  collectMessages(...args: any[]): Promise<ExportCollectResult>
   container(...args: any[]): any
+  convertMessageType(localType: number, content: string): number
   createCollectProgressReporter(...args: any[]): any
   createProgressEmitter(...args: any[]): any
   data(...args: any[]): any
@@ -70,6 +74,7 @@ export interface ExportWriterHost {
   hydrateEmojiCaptionsForMessages(...args: any[]): any
   isMediaContentBatchExport(...args: any[]): any
   isQuotedReplyMessage(...args: any[]): any
+  isReadableSystemMessage(localType: number, content: string): boolean
   isSameWxid(...args: any[]): any
   isTransferExportContent(...args: any[]): any
   isUnboundedDateRange(...args: any[]): any
@@ -94,8 +99,16 @@ export interface ExportWriterHost {
   reserveUniqueOutputPath(...args: any[]): any
   resetMediaRuntimeState(...args: any[]): any
   resolveCollectParams(...args: any[]): any
-  resolveExportDisplayProfile(...args: any[]): any
+  resolveExportDisplayProfile(
+    wxid: string,
+    preference: ExportOptions['displayNamePreference'],
+    getContact: (username: string) => Promise<{ success: boolean; contact?: any; error?: string }>,
+    groupNicknamesMap: Map<string, string>,
+    fallbackDisplayName?: string,
+    extraGroupNicknameCandidates?: Array<string | undefined | null>
+  ): Promise<ExportDisplayProfile>
   resolveExportWriteLayout(...args: any[]): any
+  resolveGroupNicknameByCandidates(groupNicknamesMap: Map<string, string>, candidates: Array<string | undefined | null>): string
   resolveQuotedMessagesForExport(...args: any[]): any
   resolveQuotedReplyDisplayWithNames(...args: any[]): any
   resolveTransferDesc(...args: any[]): any
@@ -103,7 +116,9 @@ export interface ExportWriterHost {
   setAggregatedSessionStatsCache(...args: any[]): any
   setExportStatsCacheEntry(...args: any[]): any
   sumSenderCountsByIdentity(...args: any[]): any
-  throwIfStopRequested(...args: any[]): any
+  throwIfStopRequested(control?: ExportTaskControl): void
   transcribeVoice(...args: any[]): any
   triggerMediaFileCacheCleanup(...args: any[]): any
 }
+
+export type { ExportCollectedRow, ExportCollectResult }

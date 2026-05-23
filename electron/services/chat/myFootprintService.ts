@@ -14,6 +14,7 @@ import {
   decodeHtmlEntities,
   decodeMaybeCompressed,
   decodeMessageContent,
+  sanitizeQuotedContent,
   looksLikeBase64,
   looksLikeHex,
   parseMessageContent,

@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { chatService } from './chatService'
 
-interface ContactExportOptions {
+export interface ContactExportOptions {
     format: 'json' | 'csv' | 'vcf'
     exportAvatars: boolean
     contactTypes: {

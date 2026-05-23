@@ -1,4 +1,3 @@
-// @ts-nocheck
 import * as fs from 'fs'
 import * as path from 'path'
 import type { ExportWriterHost } from './exportWriterContext'
@@ -324,7 +323,8 @@ export const exportHtmlMixin = {
         const mediaItem = mediaCache.get(mediaKey) || null
 
         const isSenderMe = msg.isSend
-        const senderInfo = collected.memberSet.get(msg.senderUsername)?.member
+        const senderUsername = String(msg.senderUsername || '').trim()
+        const senderInfo = collected.memberSet.get(senderUsername)?.member
         const senderName = isGroup
           ? (() => {
             const senderKey = `${isSenderMe ? cleanedMyWxid : (msg.senderUsername || cleanedMyWxid)}::${isSenderMe ? '1' : '0'}`
@@ -383,7 +383,7 @@ export const exportHtmlMixin = {
             msg.content,
             cleanedMyWxid,
             groupNicknamesMap,
-            async (username) => {
+            async (username: string) => {
               const c = await getContactCached(username)
               if (c.success && c.contact) {
                 return c.contact.remark || c.contact.nickName || c.contact.alias || username

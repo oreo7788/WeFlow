@@ -1,4 +1,3 @@
-// @ts-nocheck
 import * as fs from 'fs'
 import * as path from 'path'
 import type { ExportWriterHost } from './exportWriterContext'
@@ -284,7 +283,7 @@ export const exportTxtMixin = {
             msg.content,
             cleanedMyWxid,
             groupNicknamesMap,
-            async (username) => {
+            async (username: string) => {
               const c = await getContactCached(username)
               if (c.success && c.contact) {
                 return c.contact.remark || c.contact.nickName || c.contact.alias || username

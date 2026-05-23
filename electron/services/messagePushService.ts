@@ -37,6 +37,7 @@ interface MessagePushPayload {
   groupName?: string
   content: string | null
   timestamp: number
+  [key: string]: unknown
 }
 
 const PUSH_CONFIG_KEYS = new Set([
@@ -606,7 +607,7 @@ class MessagePushService {
       ].join(' ')
       const result = await wcdbService.execQuery('message', table.dbPath, sql)
       if (!result.success || !Array.isArray(result.rows) || result.rows.length === 0) continue
-      messages.push(...chatService.mapRowsToMessagesForApi(result.rows as Record<string, any>[]))
+      messages.push(...chatService.mapRowsToMessagesForApi(result.rows as Record<string, any>[], sessionId))
     }
 
     return messages
@@ -630,7 +631,7 @@ class MessagePushService {
       ].join(' ')
       const result = await wcdbService.execQuery('message', table.dbPath, sql)
       if (!result.success || !Array.isArray(result.rows) || result.rows.length === 0) continue
-      messages.push(...chatService.mapRowsToMessagesForApi(result.rows as Record<string, any>[]))
+      messages.push(...chatService.mapRowsToMessagesForApi(result.rows as Record<string, any>[], sessionId))
     }
 
     return messages.sort((left, right) => this.compareMessagePosition(left, right))
@@ -666,7 +667,7 @@ class MessagePushService {
       ].filter(Boolean).join(' ')
       const result = await wcdbService.execQuery('message', table.dbPath, sql)
       if (!result.success || !Array.isArray(result.rows) || result.rows.length === 0) continue
-      const [message] = chatService.mapRowsToMessagesForApi(result.rows as Record<string, any>[])
+      const [message] = chatService.mapRowsToMessagesForApi(result.rows as Record<string, any>[], sessionId)
       if (message && !this.isRevokeSystemMessage(message)) return message
     }
 
@@ -1164,17 +1165,17 @@ class MessagePushService {
     return 'jpg'
   }
 
-  private getSessionType(sessionId: string, session: ChatSession): MessagePushPayload['sessionType'] {
+  private getSessionType(sessionId: string, _session: ChatSession): MessagePushPayload['sessionType'] {
     if (sessionId.endsWith('@chatroom')) {
       return 'group'
     }
-    if (sessionId.startsWith('gh_') || session.type === 'official') {
+    if (sessionId.startsWith('gh_')) {
       return 'official'
     }
-    if (session.type === 'friend') {
-      return 'private'
+    if (sessionId.includes('@openim') || (sessionId.startsWith('weixin') && sessionId.toLowerCase() !== 'weixin')) {
+      return 'other'
     }
-    return 'other'
+    return 'private'
   }
 
   private shouldPushPayload(payload: MessagePushPayload): boolean {

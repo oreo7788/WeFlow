@@ -126,7 +126,7 @@ jobs:
       - name: Build Frontend & Type Check
         shell: bash
         run: |
-          npx tsc
+          npm run typecheck
           npx vite build
 
       - name: Package macOS arm64 preview artifacts
@@ -185,7 +185,7 @@ jobs:
       - name: Build Frontend & Type Check
         shell: bash
         run: |
-          npx tsc
+          npm run typecheck
           npx vite build
 
       - name: Package Linux preview artifacts
@@ -238,7 +238,7 @@ jobs:
       - name: Build Frontend & Type Check
         shell: bash
         run: |
-          npx tsc
+          npm run typecheck
           npx vite build
 
       - name: Package Windows x64 preview artifacts
@@ -291,7 +291,7 @@ jobs:
       - name: Build Frontend & Type Check
         shell: bash
         run: |
-          npx tsc
+          npm run typecheck
           npx vite build
 
       - name: Package Windows arm64 preview artifacts

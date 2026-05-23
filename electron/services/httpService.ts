@@ -305,7 +305,7 @@ class HttpService {
     }
   }
 
-  broadcastMessagePush(payload: Record<string, unknown>): void {
+  broadcastMessagePush(payload: { event?: string; sessionId?: string; [key: string]: unknown }): void {
     if (!this.running) return
     const eventId = this.nextMessagePushEventId()
     const eventName = this.getMessagePushEventName(payload)
@@ -664,7 +664,7 @@ class HttpService {
         const finalHasMore = hasMore || reachedLimit
         const messages = useLiteMapping
           ? chatService.mapRowsToMessagesLiteForApi(collectedRows)
-          : chatService.mapRowsToMessagesForApi(collectedRows)
+          : chatService.mapRowsToMessagesForApi(collectedRows, talker)
         await this.backfillMissingSenderUsernames(talker, messages)
         return { success: true, messages, hasMore: finalHasMore }
       } finally {
@@ -724,7 +724,7 @@ class HttpService {
           try {
             const detail = await wcdbService.getMessageById(talker, localId)
             if (detail.success && detail.message) {
-              const hydrated = chatService.mapRowsToMessagesForApi([detail.message])[0]
+              const hydrated = chatService.mapRowsToMessagesForApi([detail.message], talker)[0]
               if (hydrated?.senderUsername) {
                 msg.senderUsername = hydrated.senderUsername
               }

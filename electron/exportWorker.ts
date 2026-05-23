@@ -1,4 +1,6 @@
 import { parentPort, workerData } from 'worker_threads'
+import type { ExportOptions, ExportProgress } from './services/exportServiceTypes'
+import type { ContactExportOptions } from './services/contactExportService'
 
 interface ExportWorkerConfig {
   mode?: 'sessions' | 'single' | 'contacts'
@@ -6,7 +8,7 @@ interface ExportWorkerConfig {
   sessionId?: string
   outputDir?: string
   outputPath?: string
-  options?: Record<string, unknown>
+  options?: ExportOptions | ContactExportOptions
   taskId?: string
   dbPath?: string
   decryptKey?: string
@@ -156,7 +158,7 @@ async function run() {
       }
     : undefined
 
-  const onProgress = (progress: ExportProgressPayload) => queueProgress(progress)
+  const onProgress = (progress: ExportProgress) => queueProgress({ ...progress })
 
   let result: unknown
   if (config.mode === 'contacts') {
@@ -171,7 +173,7 @@ async function run() {
     })
     result = await contactExportService.exportContacts(
       String(config.outputDir || ''),
-      config.options || {}
+      (config.options || { format: 'json', exportAvatars: false, contactTypes: { friends: true, groups: true, officials: true } }) as ContactExportOptions
     )
   } else {
     const { exportService } = await import('./services/exportService')
@@ -187,7 +189,7 @@ async function run() {
       result = await exportService.exportSessionToChatLab(
         String(config.sessionId || '').trim(),
         String(config.outputPath || '').trim(),
-        config.options || { format: 'chatlab' },
+        (config.options || { format: 'chatlab' }) as ExportOptions,
         onProgress,
         taskControl
       )
@@ -195,7 +197,7 @@ async function run() {
       result = await exportService.exportSessions(
         Array.isArray(config.sessionIds) ? config.sessionIds : [],
         String(config.outputDir || ''),
-        config.options || { format: 'json' },
+        (config.options || { format: 'json' }) as ExportOptions,
         onProgress,
         taskControl
       )

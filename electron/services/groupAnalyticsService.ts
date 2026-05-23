@@ -848,9 +848,9 @@ class GroupAnalyticsService {
     return ''
   }
 
-  private parseSingleMessageRow(row: Record<string, any>): Message | null {
+  private parseSingleMessageRow(row: Record<string, any>, sessionId: string): Message | null {
     try {
-      const mapped = chatService.mapRowsToMessagesForApi([row])
+      const mapped = chatService.mapRowsToMessagesForApi([row], sessionId)
       if (Array.isArray(mapped) && mapped.length > 0) {
         const msg = mapped[0]
         if (!msg.localType) {
@@ -920,7 +920,7 @@ class GroupAnalyticsService {
           if (senderFromRow && !matchesTargetSender(senderFromRow)) {
             continue
           }
-          const message = this.parseSingleMessageRow(row)
+          const message = this.parseSingleMessageRow(row, chatroomId)
           if (!message) continue
           if (matchesTargetSender(message.senderUsername)) {
             matchedMessages.push(message)
@@ -1027,7 +1027,7 @@ class GroupAnalyticsService {
               continue
             }
 
-            const message = this.parseSingleMessageRow(row)
+            const message = this.parseSingleMessageRow(row, normalizedChatroomId)
             if (!message) continue
             if (!matchesTargetSender(message.senderUsername)) {
               continue
@@ -1172,7 +1172,7 @@ class GroupAnalyticsService {
     const myWxid = this.cleanAccountDirName(this.configService.get('myWxid') || '')
     let myGroupMessageCountHint: number | undefined
 
-    const data: GroupMembersPanelEntry[] = members
+    const data = members
       .map((member) => {
         const wxid = String(member.username || '').trim()
         if (!wxid) return null
@@ -1200,17 +1200,17 @@ class GroupAnalyticsService {
         return {
           username: wxid,
           displayName,
-          nickname,
-          alias,
-          remark,
-          groupNickname,
+          nickname: nickname || undefined,
+          alias: alias || undefined,
+          remark: remark || undefined,
+          groupNickname: groupNickname || undefined,
           avatarUrl: member.avatarUrl,
           isOwner: Boolean(ownerUsername && ownerUsername === wxid),
           isFriend: this.isFriendMember(wxid, contact),
           messageCount: this.resolveMessageCountByCandidates(messageCountLookup, lookupCandidates)
         }
       })
-      .filter((member): member is GroupMembersPanelEntry => Boolean(member))
+      .filter((member) => member !== null) as GroupMembersPanelEntry[]
 
     if (includeMessageCounts && myWxid) {
       const selfEntry = data.find((member) => this.cleanAccountDirName(member.username) === myWxid)

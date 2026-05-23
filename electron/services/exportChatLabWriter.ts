@@ -1,4 +1,3 @@
-// @ts-nocheck
 import * as fs from 'fs'
 import * as path from 'path'
 import type { ExportWriterHost } from './exportWriterContext'
@@ -251,15 +250,16 @@ export const exportChatLabMixin = {
         if ((messageIndex++ & 0x7f) === 0) {
           this.throwIfStopRequested(control)
         }
-        const memberInfo = collected.memberSet.get(msg.senderUsername)?.member || {
-          platformId: msg.senderUsername,
-          accountName: msg.senderUsername,
+        const senderUsername = String(msg.senderUsername || '').trim() || cleanedMyWxid
+        const memberInfo = collected.memberSet.get(senderUsername)?.member || {
+          platformId: senderUsername,
+          accountName: senderUsername,
           groupNickname: undefined
         }
 
         // 如果 memberInfo 中没有群昵称，尝试从 groupNicknamesMap 获取
         const groupNickname = memberInfo.groupNickname
-          || (isGroup ? this.resolveGroupNicknameByCandidates(groupNicknamesMap, [msg.senderUsername]) : '')
+          || (isGroup ? this.resolveGroupNicknameByCandidates(groupNicknamesMap, [senderUsername]) : '')
           || ''
         const senderProfile = isGroup
           ? await this.resolveExportDisplayProfile(
@@ -303,8 +303,8 @@ export const exportChatLabMixin = {
             msg.emojiCaption
           )
         }
-        if (this.isReadableSystemMessage(msg.localType, msg.content)) {
-          content = this.extractReadableSystemMessageText(msg.content) || content
+        if (this.isReadableSystemMessage(msg.localType ?? 0, String(msg.content || ''))) {
+          content = this.extractReadableSystemMessageText(String(msg.content || '')) || content
         }
 
         // 转账消息：追加 "谁转账给谁" 信息
@@ -313,7 +313,7 @@ export const exportChatLabMixin = {
             msg.content,
             cleanedMyWxid,
             groupNicknamesMap,
-            async (username) => {
+            async (username: string) => {
               const info = await this.getContactInfo(username)
               return info.displayName || username
             }
@@ -329,11 +329,11 @@ export const exportChatLabMixin = {
         }
 
         const message: ChatLabMessage = {
-          sender: msg.senderUsername,
+          sender: senderUsername,
           accountName: senderProfile.displayName || memberInfo.accountName,
           groupNickname: (senderProfile.groupNickname || groupNickname) || undefined,
-          timestamp: msg.createTime,
-          type: this.convertMessageType(msg.localType, msg.content),
+          timestamp: Number(msg.createTime || 0),
+          type: this.convertMessageType(msg.localType ?? 0, String(msg.content || '')),
           content: content
         }
 
@@ -348,7 +348,7 @@ export const exportChatLabMixin = {
         }
 
         // 如果有聊天记录，添加为嵌套字段
-        if (msg.chatRecordList && msg.chatRecordList.length > 0) {
+        if (Array.isArray(msg.chatRecordList) && msg.chatRecordList.length > 0) {
           const chatRecords: any[] = []
 
           for (const record of msg.chatRecordList) {
@@ -407,33 +407,36 @@ export const exportChatLabMixin = {
                 recordContent = record.datadesc || record.datatitle || '[消息]'
             }
 
+            const sourceName = String(record.sourcename || '').trim()
+            const sourceHeadUrl = record.sourceheadurl ? String(record.sourceheadurl) : ''
+
             const chatRecord: any = {
-              sender: record.sourcename || 'unknown',
-              accountName: record.sourcename || 'unknown',
+              sender: sourceName || 'unknown',
+              accountName: sourceName || 'unknown',
               timestamp: recordTimestamp,
               type: recordType,
               content: recordContent
             }
 
             // 添加头像（如果启用导出头像）
-            if (options.exportAvatars && record.sourceheadurl) {
-              chatRecord.avatar = record.sourceheadurl
+            if (options.exportAvatars && sourceHeadUrl) {
+              chatRecord.avatar = sourceHeadUrl
             }
 
             chatRecords.push(chatRecord)
 
             // 添加成员信息到 memberSet
-            if (record.sourcename && !collected.memberSet.has(record.sourcename)) {
+            if (sourceName && !collected.memberSet.has(sourceName)) {
               const newMember: ChatLabMember = {
-                platformId: record.sourcename,
-                accountName: record.sourcename
+                platformId: sourceName,
+                accountName: sourceName
               }
-              if (options.exportAvatars && record.sourceheadurl) {
-                newMember.avatar = record.sourceheadurl
+              if (options.exportAvatars && sourceHeadUrl) {
+                newMember.avatar = sourceHeadUrl
               }
-              collected.memberSet.set(record.sourcename, {
+              collected.memberSet.set(sourceName, {
                 member: newMember,
-                avatarUrl: record.sourceheadurl
+                avatarUrl: sourceHeadUrl || undefined
               })
             }
           }

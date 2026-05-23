@@ -29,7 +29,7 @@ const isSafeStorageAvailable = (): boolean => {
 }
 const LOCK_PREFIX = 'lock:'  // 密码派生密钥加密（锁定模式）
 
-interface ConfigSchema {
+export interface ConfigSchema {
   // 数据库相关
   dbPath: string
   decryptKey: string

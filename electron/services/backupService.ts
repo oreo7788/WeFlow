@@ -467,10 +467,10 @@ export class BackupService {
     )
     if (!opened) {
       const detail = await wcdbService.getLastInitError().catch(() => null)
-      return { success: false, error: detail || `目标账号 ${accountDirName} 数据库连接失败` }
+      return { success: false, error: detail || `目标账号 ${wxid} 数据库连接失败` }
     }
 
-    return { success: true, wxid: accountDirName, dbPath, dbStorage }
+    return { success: true, wxid, dbPath, dbStorage }
   }
 
   private buildDbId(kind: BackupDbKind, index: number, dbPath: string): string {

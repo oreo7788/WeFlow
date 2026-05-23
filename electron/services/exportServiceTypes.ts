@@ -75,6 +75,40 @@ export const MESSAGE_TYPE_MAP: Record<number, number> = {
 export const FILE_APP_LOCAL_TYPES = [49, 34359738417, 103079215153, 25769803825] as const
 export const FILE_APP_LOCAL_TYPE_SET = new Set<number>(FILE_APP_LOCAL_TYPES)
 
+export interface ExportCollectedRow {
+  localType?: number
+  localId?: number
+  createTime?: number
+  serverId?: number
+  serverIdRaw?: string
+  senderUsername?: string | null
+  isSend?: number | null
+  content?: string
+  rawContent?: string
+  parsedContent?: string
+  messageKey?: string
+  chatRecordList?: Array<{ sourcetime?: string; [key: string]: unknown }>
+  emojiCaption?: string
+  locationLat?: number
+  locationLng?: number
+  locationPoiname?: string
+  locationLabel?: string
+  videoMd5?: string
+  imageMd5?: string
+  imageDatName?: string
+  emojiMd5?: string
+  emojiCdnUrl?: string
+  [key: string]: unknown
+}
+
+export interface ExportCollectResult {
+  rows: ExportCollectedRow[]
+  memberSet: Map<string, { member: ChatLabMember; avatarUrl?: string }>
+  firstTime: number | null
+  lastTime: number | null
+  error?: string
+}
+
 export interface ExportOptions {
   format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'arkme-json' | 'html' | 'txt' | 'excel' | 'weclone' | 'sql'
   contentType?: 'text' | 'voice' | 'image' | 'video' | 'emoji' | 'file'
