@@ -536,7 +536,14 @@ export interface ElectronAPI {
     getAllVoiceMessages: (sessionId: string) => Promise<{ success: boolean; messages?: Message[]; error?: string }>
     getAllImageMessages: (sessionId: string) => Promise<{
       success: boolean
-      images?: { imageMd5?: string; imageOriginSourceMd5?: string; imageDatName?: string; createTime?: number }[]
+      images?: {
+        localId?: number
+        senderUsername?: string
+        imageMd5?: string
+        imageOriginSourceMd5?: string
+        imageDatName?: string
+        createTime?: number
+      }[]
       error?: string
     }>
     getMessageDates: (sessionId: string) => Promise<{ success: boolean; dates?: string[]; error?: string }>

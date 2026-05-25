@@ -7,6 +7,11 @@ import { useShallow } from 'zustand/react/shallow'
 import { useChatStore } from '../stores/chatStore'
 import { useBatchTranscribeStore, type BatchVoiceTaskType } from '../stores/batchTranscribeStore'
 import { useBatchImageDecryptStore } from '../stores/batchImageDecryptStore'
+import {
+  buildBatchDecryptFailureItem,
+  handleBatchDecryptComplete
+} from '../stores/batchDecryptFailureStore'
+import type { BatchDecryptFailureItem } from '../types/batchDecryptFailure'
 import type { ChatSession, Message } from '../types/models'
 import { getEmojiPath } from 'wechat-emojis'
 import { VoiceTranscribeDialog } from '../components/VoiceTranscribeDialog'
@@ -242,6 +247,8 @@ function isFoldPlaceholderSession(sessionId?: string | null): boolean {
 }
 
 interface BatchImageDecryptCandidate {
+  localId?: number
+  senderUsername?: string
   imageMd5?: string
   imageOriginSourceMd5?: string
   imageDatName?: string
@@ -477,7 +484,9 @@ function ChatPage(props: ChatPageProps) {
     setHasMoreMessages,
     hasMoreLater,
     setHasMoreLater,
-    setSearchKeyword
+    setSearchKeyword,
+    setPendingMessageJump,
+    pendingMessageJump
   } = useChatStore(useShallow((state) => ({
     isConnected: state.isConnected,
     isConnecting: state.isConnecting,
@@ -503,7 +512,9 @@ function ChatPage(props: ChatPageProps) {
     setHasMoreMessages: state.setHasMoreMessages,
     hasMoreLater: state.hasMoreLater,
     setHasMoreLater: state.setHasMoreLater,
-    setSearchKeyword: state.setSearchKeyword
+    setSearchKeyword: state.setSearchKeyword,
+    setPendingMessageJump: state.setPendingMessageJump,
+    pendingMessageJump: state.pendingMessageJump
   })))
 
   const messageListRef = useRef<HTMLDivElement>(null)
@@ -4133,6 +4144,24 @@ function ChatPage(props: ChatPageProps) {
     scrollToResolvedMessage(resolved, 'auto')
   }, [messages, findQuotedTargetInMessages, scrollToResolvedMessage])
 
+  useEffect(() => {
+    if (!isPageActive || !pendingMessageJump?.sessionId) return
+    if (currentSessionId !== pendingMessageJump.sessionId) {
+      setCurrentSession(pendingMessageJump.sessionId, { preserveMessages: false })
+      return
+    }
+    const target = pendingMessageJump
+    setPendingMessageJump(null)
+    handleJumpToQuotedMessage(target)
+  }, [
+    isPageActive,
+    pendingMessageJump,
+    currentSessionId,
+    setCurrentSession,
+    setPendingMessageJump,
+    handleJumpToQuotedMessage
+  ])
+
   const handleInSessionResultJump = useCallback((msg: Message) => {
     const targetTime = Number(msg.createTime || 0)
     const targetSessionId = String(currentSessionRef.current || currentSessionId || '').trim()
@@ -5432,6 +5461,52 @@ function ChatPage(props: ChatPageProps) {
     let notFoundCount = 0
     let decryptFailedCount = 0
     let completed = 0
+    const failureRecords: BatchDecryptFailureItem[] = []
+    const sessionName = session.displayName || session.username
+    const recordFailure = (
+      img: typeof images[0],
+      failureKind: 'not_found' | 'decrypt_failed',
+      error?: string
+    ) => {
+      failureRecords.push(buildBatchDecryptFailureItem({
+        sourcePage: 'chat',
+        sessionId: session.username,
+        sessionName,
+        localId: img.localId,
+        senderUsername: img.senderUsername,
+        createTime: img.createTime,
+        imageMd5: img.imageMd5,
+        imageOriginSourceMd5: img.imageOriginSourceMd5,
+        imageDatName: img.imageDatName,
+        failureKind,
+        error
+      }))
+    }
+    const finalizeBatchDecryptOutcome = (
+      status: 'completed' | 'failed' | 'canceled',
+      detail: string,
+      progressText: string
+    ) => {
+      finishDecrypt(successCount, failCount, { status, detail, progressText })
+      const totalFailures = notFoundCount + decryptFailedCount
+      if (totalFailures > 0) {
+        handleBatchDecryptComplete({
+          success: successCount,
+          notFound: notFoundCount,
+          decryptFailed: decryptFailedCount,
+          failures: failureRecords,
+          sourcePage: 'chat',
+          sessionName,
+          onNotify: (message, title) => {
+            window.alert(`${title}\n${message}`)
+          }
+        })
+        return
+      }
+      if (status === 'completed' && successCount > 0) {
+        window.alert(`批量解密完成\n成功 ${successCount}`)
+      }
+    }
     const controlState = {
       cancelRequested: false,
       pauseRequested: false,
@@ -5500,11 +5575,11 @@ function ChatPage(props: ChatPageProps) {
       await waitIfPaused()
       if (controlState.cancelRequested) {
         const remaining = Math.max(0, totalImages - completed)
-        finishDecrypt(successCount, failCount, {
-          status: 'canceled',
-          detail: `图片批量解密已中断：已处理 ${completed}/${totalImages}（成功 ${successCount}，未找到 ${notFoundCount}，解密失败 ${decryptFailedCount}，未处理 ${remaining}）`,
-          progressText: `成功 ${successCount} / 未找到 ${notFoundCount} / 解密失败 ${decryptFailedCount}`
-        })
+        finalizeBatchDecryptOutcome(
+          'canceled',
+          `图片批量解密已中断：已处理 ${completed}/${totalImages}（成功 ${successCount}，未找到 ${notFoundCount}，解密失败 ${decryptFailedCount}，未处理 ${remaining}）`,
+          `成功 ${successCount} / 未找到 ${notFoundCount} / 解密失败 ${decryptFailedCount}`
+        )
         return
       }
       await runHardlinkPreloadIfNeeded(
@@ -5514,11 +5589,11 @@ function ChatPage(props: ChatPageProps) {
       await waitIfPaused()
       if (controlState.cancelRequested) {
         const remaining = Math.max(0, totalImages - completed)
-        finishDecrypt(successCount, failCount, {
-          status: 'canceled',
-          detail: `图片批量解密已中断：已处理 ${completed}/${totalImages}（成功 ${successCount}，未找到 ${notFoundCount}，解密失败 ${decryptFailedCount}，未处理 ${remaining}）`,
-          progressText: `成功 ${successCount} / 未找到 ${notFoundCount} / 解密失败 ${decryptFailedCount}`
-        })
+        finalizeBatchDecryptOutcome(
+          'canceled',
+          `图片批量解密已中断：已处理 ${completed}/${totalImages}（成功 ${successCount}，未找到 ${notFoundCount}，解密失败 ${decryptFailedCount}，未处理 ${remaining}）`,
+          `成功 ${successCount} / 未找到 ${notFoundCount} / 解密失败 ${decryptFailedCount}`
+        )
         return
       }
     }
@@ -5544,12 +5619,18 @@ function ChatPage(props: ChatPageProps) {
         if (r?.success) successCount++
         else {
           failCount++
-          if (r?.failureKind === 'decrypt_failed') decryptFailedCount++
-          else notFoundCount++
+          if (r?.failureKind === 'decrypt_failed') {
+            decryptFailedCount++
+            recordFailure(img, 'decrypt_failed', r?.error)
+          } else {
+            notFoundCount++
+            recordFailure(img, 'not_found', r?.error)
+          }
         }
-      } catch {
+      } catch (error) {
         failCount++
         notFoundCount++
+        recordFailure(img, 'not_found', String(error))
       }
       completed++
       updateDecryptProgress(completed, totalImages)
@@ -5576,19 +5657,19 @@ function ChatPage(props: ChatPageProps) {
 
     if (controlState.cancelRequested) {
       const remaining = Math.max(0, totalImages - completed)
-      finishDecrypt(successCount, failCount, {
-        status: 'canceled',
-        detail: `图片批量解密已中断：已处理 ${completed}/${totalImages}（成功 ${successCount}，未找到 ${notFoundCount}，解密失败 ${decryptFailedCount}，未处理 ${remaining}）`,
-        progressText: `成功 ${successCount} / 未找到 ${notFoundCount} / 解密失败 ${decryptFailedCount}`
-      })
+      finalizeBatchDecryptOutcome(
+        'canceled',
+        `图片批量解密已中断：已处理 ${completed}/${totalImages}（成功 ${successCount}，未找到 ${notFoundCount}，解密失败 ${decryptFailedCount}，未处理 ${remaining}）`,
+        `成功 ${successCount} / 未找到 ${notFoundCount} / 解密失败 ${decryptFailedCount}`
+      )
       return
     }
 
-    finishDecrypt(successCount, failCount, {
-      status: decryptFailedCount > 0 ? 'failed' : 'completed',
-      detail: `图片批量解密完成：成功 ${successCount}，未找到 ${notFoundCount}，解密失败 ${decryptFailedCount}`,
-      progressText: `成功 ${successCount} / 未找到 ${notFoundCount} / 解密失败 ${decryptFailedCount}`
-    })
+    finalizeBatchDecryptOutcome(
+      decryptFailedCount > 0 ? 'failed' : 'completed',
+      `图片批量解密完成：成功 ${successCount}，未找到 ${notFoundCount}，解密失败 ${decryptFailedCount}`,
+      `成功 ${successCount} / 未找到 ${notFoundCount} / 解密失败 ${decryptFailedCount}`
+    )
   }, [batchImageMessages, batchImageSelectedDates, batchDecryptConcurrency, currentSessionId, finishDecrypt, sessions, startDecrypt, updateDecryptTaskStatus, updateDecryptProgress])
 
   const batchImageCountByDate = useMemo(() => {

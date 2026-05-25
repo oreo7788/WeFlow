@@ -988,7 +988,7 @@ export class MediaAssetsService {
    */
   async getAllImageMessages(
     sessionId: string
-  ): Promise<{ success: boolean; images?: { imageMd5?: string; imageOriginSourceMd5?: string; imageDatName?: string; createTime?: number }[]; error?: string }> {
+  ): Promise<{ success: boolean; images?: { localId?: number; senderUsername?: string; imageMd5?: string; imageOriginSourceMd5?: string; imageDatName?: string; createTime?: number }[]; error?: string }> {
     try {
       const connectResult = await this.host.ensureConnected()
       if (!connectResult.success) {
@@ -1001,9 +1001,11 @@ export class MediaAssetsService {
       }
 
       const mapped = mapRowsToMessages(result.rows as Record<string, any>[], sessionId, String(this.host.getMyWxidCleaned() || '').trim())
-      let allImages: Array<{ imageMd5?: string; imageOriginSourceMd5?: string; imageDatName?: string; createTime?: number }> = mapped
+      let allImages: Array<{ localId?: number; senderUsername?: string; imageMd5?: string; imageOriginSourceMd5?: string; imageDatName?: string; createTime?: number }> = mapped
         .filter(msg => msg.localType === 3)
         .map(msg => ({
+          localId: msg.localId > 0 ? msg.localId : undefined,
+          senderUsername: msg.senderUsername || undefined,
           imageMd5: msg.imageMd5 || undefined,
           imageOriginSourceMd5: msg.imageOriginSourceMd5 || undefined,
           imageDatName: msg.imageDatName || undefined,

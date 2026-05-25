@@ -1,9 +1,15 @@
 import { forwardRef, memo, useCallback, useEffect, useMemo, useRef, useState, type HTMLAttributes } from 'react'
-import { Calendar, Image as ImageIcon, Info, Loader2, PlayCircle, RefreshCw, Trash2, UserRound } from 'lucide-react'
+import { Calendar, Image as ImageIcon, Info, Loader2, PlayCircle, RefreshCw, Trash2, UserRound, AlertTriangle } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import { VirtuosoGrid } from 'react-virtuoso'
 import { finishBackgroundTask, registerBackgroundTask, updateBackgroundTask } from '../services/backgroundTaskMonitor'
 import { runHardlinkPreloadIfNeeded } from '../utils/runHardlinkPreload'
 import { collectImageHardlinkMd5s } from '../utils/collectImageHardlinkMd5s'
+import {
+  buildBatchDecryptFailureItem,
+  handleBatchDecryptComplete
+} from '../stores/batchDecryptFailureStore'
+import type { BatchDecryptFailureItem } from '../types/batchDecryptFailure'
 import './ResourcesPage.scss'
 
 type MediaTab = 'image' | 'video'
@@ -298,6 +304,7 @@ const MediaCard = memo(function MediaCard({
 })
 
 function ResourcesPage() {
+  const navigate = useNavigate()
   const [tab, setTab] = useState<MediaTab>('image')
   const [contacts, setContacts] = useState<ContactOption[]>([{ id: 'all', name: '全部联系人' }])
   const [selectedContact, setSelectedContact] = useState('all')
@@ -1244,6 +1251,7 @@ function ResourcesPage() {
     let success = 0
     let notFound = 0
     let decryptFailed = 0
+    const failureRecords: BatchDecryptFailureItem[] = []
     const previewPatch: Record<string, string> = {}
     const updatePatch: Record<string, boolean> = {}
     const taskId = registerBackgroundTask({
@@ -1298,6 +1306,19 @@ function ResourcesPage() {
           try {
             if (!hasImageLocator(item)) {
               notFound += 1
+              failureRecords.push(buildBatchDecryptFailureItem({
+                sourcePage: 'resources',
+                sessionId: item.sessionId,
+                sessionName: item.sessionDisplayName || item.sessionId,
+                localId: item.localId,
+                senderUsername: item.senderUsername,
+                createTime: item.createTime,
+                imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
+                imageOriginSourceMd5: getImageOriginSourceMd5(item) || undefined,
+                imageDatName: getSafeImageDatName(item) || undefined,
+                failureKind: 'not_found',
+                error: '缺少图片标识（imageMd5/imageDatName）'
+              }))
               continue
             }
             const result = await window.electronAPI.image.decrypt({
@@ -1309,8 +1330,37 @@ function ResourcesPage() {
               suppressEvents: true
             })
             if (!result?.success) {
-              if (result?.failureKind === 'decrypt_failed') decryptFailed += 1
-              else notFound += 1
+              if (result?.failureKind === 'decrypt_failed') {
+                decryptFailed += 1
+                failureRecords.push(buildBatchDecryptFailureItem({
+                  sourcePage: 'resources',
+                  sessionId: item.sessionId,
+                  sessionName: item.sessionDisplayName || item.sessionId,
+                  localId: item.localId,
+                  senderUsername: item.senderUsername,
+                  createTime: item.createTime,
+                  imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
+                  imageOriginSourceMd5: getImageOriginSourceMd5(item) || undefined,
+                  imageDatName: getSafeImageDatName(item) || undefined,
+                  failureKind: 'decrypt_failed',
+                  error: result?.error
+                }))
+              } else {
+                notFound += 1
+                failureRecords.push(buildBatchDecryptFailureItem({
+                  sourcePage: 'resources',
+                  sessionId: item.sessionId,
+                  sessionName: item.sessionDisplayName || item.sessionId,
+                  localId: item.localId,
+                  senderUsername: item.senderUsername,
+                  createTime: item.createTime,
+                  imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
+                  imageOriginSourceMd5: getImageOriginSourceMd5(item) || undefined,
+                  imageDatName: getSafeImageDatName(item) || undefined,
+                  failureKind: 'not_found',
+                  error: result?.error
+                }))
+              }
             } else {
               success += 1
               if (result.localPath) {
@@ -1319,8 +1369,21 @@ function ResourcesPage() {
                 updatePatch[key] = isLikelyThumbnailPreview(result.localPath)
               }
             }
-          } catch {
+          } catch (error) {
             notFound += 1
+            failureRecords.push(buildBatchDecryptFailureItem({
+              sourcePage: 'resources',
+              sessionId: item.sessionId,
+              sessionName: item.sessionDisplayName || item.sessionId,
+              localId: item.localId,
+              senderUsername: item.senderUsername,
+              createTime: item.createTime,
+              imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
+              imageOriginSourceMd5: getImageOriginSourceMd5(item) || undefined,
+              imageDatName: getSafeImageDatName(item) || undefined,
+              failureKind: 'not_found',
+              error: String(error)
+            }))
           } finally {
             completed += 1
             updateTaskProgress()
@@ -1337,10 +1400,17 @@ function ResourcesPage() {
         setPreviewUpdateMap((prev) => ({ ...prev, ...updatePatch }))
       }
       setActionMessage(`批量解密完成：成功 ${success}，未找到 ${notFound}，解密失败 ${decryptFailed}`)
-      showAlert(`批量解密完成：成功 ${success}，未找到 ${notFound}，解密失败 ${decryptFailed}`, '批量解密完成')
       finishBackgroundTask(taskId, decryptFailed > 0 ? 'failed' : 'completed', {
         detail: `资源页图片批量解密完成：成功 ${success}，未找到 ${notFound}，解密失败 ${decryptFailed}`,
         progressText: `成功 ${success} / 未找到 ${notFound} / 解密失败 ${decryptFailed}`
+      })
+      handleBatchDecryptComplete({
+        success,
+        notFound,
+        decryptFailed,
+        failures: failureRecords,
+        sourcePage: 'resources',
+        onNotify: showAlert
       })
     } catch (e) {
       finishBackgroundTask(taskId, 'failed', {
@@ -1414,6 +1484,10 @@ function ResourcesPage() {
           </div>
         </div>
         <div className="toolbar-right">
+          <button type="button" className="ghost" onClick={() => navigate('/decrypt-failures')}>
+            <AlertTriangle size={14} />
+            解密失败记录
+          </button>
           <button type="button" onClick={() => void loadStream(true)} disabled={loading || loadingMore}>
             {loading ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
             刷新

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, Suspense, lazy, type ReactNode } from 'react'
+import { useEffect, useRef, useState, Suspense, lazy, useCallback, type ReactNode } from 'react'
 import { Routes, Route, Navigate, useNavigate, useLocation, type Location } from 'react-router-dom'
 import TitleBar from './components/TitleBar'
 import Sidebar from './components/Sidebar'
@@ -31,6 +31,7 @@ const NotificationWindow = lazy(() => import('./pages/NotificationWindow'))
 const AccountManagementPage = lazy(() => import('./pages/AccountManagementPage'))
 const BackupPage = lazy(() => import('./pages/BackupPage'))
 const InsightInboxPage = lazy(() => import('./pages/InsightInboxPage'))
+const DecryptFailuresPage = lazy(() => import('./pages/DecryptFailuresPage'))
 
 import { useAppStore } from './stores/appStore'
 import { themes, useThemeStore, type ThemeId, type ThemeMode } from './stores/themeStore'
@@ -44,7 +45,11 @@ import UpdateProgressCapsule from './components/UpdateProgressCapsule'
 import LockScreen from './components/LockScreen'
 import { GlobalSessionMonitor } from './components/GlobalSessionMonitor'
 import WindowCloseDialog from './components/WindowCloseDialog'
+import { BatchDecryptFailureModalHost } from './components/BatchDecryptFailureModal'
 import { setAutoMediaTasksPaused } from './pages/Chat/chatPageCacheUtils'
+import { useChatStore } from './stores/chatStore'
+import { useBatchDecryptFailureStore } from './stores/batchDecryptFailureStore'
+import type { BatchDecryptFailureItem } from './types/batchDecryptFailure'
 
 function RouteStateRedirect({ to }: { to: string }) {
   const location = useLocation()
@@ -128,6 +133,29 @@ function App() {
   // 数据收集同意状态
   const [showAnalyticsConsent, setShowAnalyticsConsent] = useState(false)
   const [analyticsConsent, setAnalyticsConsent] = useState<boolean | null>(null)
+
+  const setCurrentSession = useChatStore(state => state.setCurrentSession)
+  const setPendingMessageJump = useChatStore(state => state.setPendingMessageJump)
+  const closeFailureModal = useBatchDecryptFailureStore(state => state.closeFailureModal)
+
+  const jumpToDecryptFailureMessage = useCallback((item: BatchDecryptFailureItem) => {
+    if (!item.sessionId) return
+    setPendingMessageJump({
+      sourceMessageKey: item.id,
+      sourceCreateTime: item.createTime || 0,
+      sessionId: item.sessionId,
+      localId: item.localId,
+      createTime: item.createTime,
+      senderUsername: item.senderUsername
+    })
+    setCurrentSession(item.sessionId)
+    closeFailureModal()
+    navigate('/chat')
+  }, [closeFailureModal, navigate, setCurrentSession, setPendingMessageJump])
+
+  useEffect(() => {
+    useBatchDecryptFailureStore.getState().hydrate()
+  }, [])
 
   useEffect(() => {
     if (location.pathname !== '/settings') {
@@ -795,6 +823,7 @@ function App() {
               <Route path="/biz" element={<LazyPage><BizPage /></LazyPage>} />
               <Route path="/contacts" element={<LazyPage><ContactsPage /></LazyPage>} />
               <Route path="/resources" element={<LazyPage><ResourcesPage /></LazyPage>} />
+              <Route path="/decrypt-failures" element={<LazyPage><DecryptFailuresPage /></LazyPage>} />
               <Route path="/backup" element={<LazyPage><BackupPage /></LazyPage>} />
               <Route path="/chat-history/:sessionId/:messageId" element={<ChatHistoryPage />} />
               <Route path="/chat-history-inline/:payloadId" element={<ChatHistoryPage />} />
@@ -808,6 +837,8 @@ function App() {
           <SettingsPage onClose={handleCloseSettings} />
         </LazyPage>
       )}
+
+      <BatchDecryptFailureModalHost onJumpToMessage={jumpToDecryptFailureMessage} />
     </div>
   )
 }

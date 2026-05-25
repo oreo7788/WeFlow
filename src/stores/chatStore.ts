@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import type { QuotedMessageJumpTarget } from '../pages/Chat/messageBubbleTypes'
 import type { ChatSession, Message, Contact } from '../types/models'
 
 const messageAliasIndex = new Set<string>()
@@ -81,6 +82,9 @@ export interface ChatState {
   // 搜索
   searchKeyword: string
 
+  // 跨页面消息定位
+  pendingMessageJump: QuotedMessageJumpTarget | null
+
   // 操作
   setConnected: (connected: boolean) => void
   setConnecting: (connecting: boolean) => void
@@ -98,6 +102,8 @@ export interface ChatState {
   setContacts: (contacts: Contact[]) => void
   addContact: (contact: Contact) => void
   setSearchKeyword: (keyword: string) => void
+  setPendingMessageJump: (target: QuotedMessageJumpTarget | null) => void
+  consumePendingMessageJump: () => QuotedMessageJumpTarget | null
   reset: () => void
 }
 
@@ -116,6 +122,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   hasMoreLater: false,
   contacts: new Map(),
   searchKeyword: '',
+  pendingMessageJump: null,
 
   setConnected: (connected) => set({ isConnected: connected }),
   setConnecting: (connecting) => set({ isConnecting: connecting }),
@@ -191,6 +198,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setSearchKeyword: (keyword) => set({ searchKeyword: keyword }),
 
+  setPendingMessageJump: (target) => set({ pendingMessageJump: target }),
+
+  consumePendingMessageJump: () => {
+    const target = get().pendingMessageJump
+    if (target) {
+      set({ pendingMessageJump: null })
+    }
+    return target
+  },
+
   reset: () => set(() => {
     messageAliasIndex.clear()
     return {
@@ -207,7 +224,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       hasMoreMessages: true,
       hasMoreLater: false,
       contacts: new Map(),
-      searchKeyword: ''
+      searchKeyword: '',
+      pendingMessageJump: null
     }
   })
 }))

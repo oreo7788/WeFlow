@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
-import { Home, MessageSquare, BarChart3, FileText, Settings, Download, Aperture, UserCircle, Lock, LockOpen, ChevronUp, FolderClosed, Footprints, Users, ArchiveRestore, Sparkles } from 'lucide-react'
+import { Home, MessageSquare, BarChart3, FileText, Settings, Download, Aperture, UserCircle, Lock, LockOpen, ChevronUp, FolderClosed, Footprints, Users, ArchiveRestore, Sparkles, AlertTriangle } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
 import * as configService from '../services/config'
 import { onExportSessionStatus, requestExportSessionStatus } from '../services/exportBridge'
@@ -371,6 +371,15 @@ function Sidebar({ collapsed }: SidebarProps) {
           >
             <span className="nav-icon"><FolderClosed size={20} /></span>
             <span className="nav-label">资源浏览</span>
+          </NavLink>
+
+          <NavLink
+            to="/decrypt-failures"
+            className={`nav-item ${isActive('/decrypt-failures') ? 'active' : ''}`}
+            title={collapsed ? '解密失败记录' : undefined}
+          >
+            <span className="nav-icon"><AlertTriangle size={20} /></span>
+            <span className="nav-label">解密失败记录</span>
           </NavLink>
 
           {/* 聊天分析 */}
