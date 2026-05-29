@@ -32,11 +32,22 @@ interface TimeDistribution {
   monthlyDistribution: Record<string, number>
 }
 
+interface SelfSentDailyDistribution {
+  unit: 'day'
+  dailyDistribution: Record<string, number>
+  totalMessages: number
+  firstMessageTime: number | null
+  lastMessageTime: number | null
+  beginTimestamp: number
+  endTimestamp: number
+}
+
 interface AnalyticsState {
   // 数据
   statistics: ChatStatistics | null
   rankings: ContactRanking[]
   timeDistribution: TimeDistribution | null
+  selfSentDailyDistribution: SelfSentDailyDistribution | null
 
   // 状态
   isLoaded: boolean
@@ -46,6 +57,7 @@ interface AnalyticsState {
   setStatistics: (data: ChatStatistics) => void
   setRankings: (data: ContactRanking[]) => void
   setTimeDistribution: (data: TimeDistribution) => void
+  setSelfSentDailyDistribution: (data: SelfSentDailyDistribution) => void
   markLoaded: () => void
   clearCache: () => void
 }
@@ -56,17 +68,20 @@ export const useAnalyticsStore = create<AnalyticsState>()(
       statistics: null,
       rankings: [],
       timeDistribution: null,
+      selfSentDailyDistribution: null,
       isLoaded: false,
       lastLoadTime: null,
 
       setStatistics: (data) => set({ statistics: data }),
       setRankings: (data) => set({ rankings: data }),
       setTimeDistribution: (data) => set({ timeDistribution: data }),
+      setSelfSentDailyDistribution: (data) => set({ selfSentDailyDistribution: data }),
       markLoaded: () => set({ isLoaded: true, lastLoadTime: Date.now() }),
       clearCache: () => set({
         statistics: null,
         rankings: [],
         timeDistribution: null,
+        selfSentDailyDistribution: null,
         isLoaded: false,
         lastLoadTime: null
       }),

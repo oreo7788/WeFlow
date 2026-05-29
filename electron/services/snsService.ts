@@ -14,6 +14,7 @@ export interface SnsLivePhoto {
     thumb: string
     md5?: string
     token?: string
+    thumbToken?: string
     key?: string
     encIdx?: string
 }
@@ -23,6 +24,7 @@ export interface SnsMedia {
     thumb: string
     md5?: string
     token?: string
+    thumbToken?: string
     key?: string
     encIdx?: string
     livePhoto?: SnsLivePhoto
@@ -126,12 +128,22 @@ const fixSnsUrl = (url: string, token?: string, isVideo: boolean = false) => {
 
     let fixedUrl = url.replace('http://', 'https://')
 
-    // 只有非视频（即图片）才需要处理 /150 变 /0
+    // 只有非视频（即图片）才需要处理路径末尾的尺寸标识（/150、/200等）变为 /0
     if (!isVideo) {
-        fixedUrl = fixedUrl.replace(/\/150($|\?)/, '/0$1')
+        const [pathPart, queryPart] = fixedUrl.split('?')
+        const fixedPath = pathPart.replace(/\/(150|200|480)($|\?)/, '/0$2')
+        fixedUrl = queryPart ? `${fixedPath}?${queryPart}` : fixedPath
     }
 
-    if (!token || fixedUrl.includes('token=')) return fixedUrl
+    // 如果没有提供新token，直接返回
+    if (!token) return fixedUrl
+
+    // 移除已有的token和idx参数
+    const [pathPart, queryPart] = fixedUrl.split('?')
+    if (queryPart) {
+        const params = queryPart.split('&').filter(p => !p.startsWith('token=') && !p.startsWith('idx='))
+        fixedUrl = params.length > 0 ? `${pathPart}?${params.join('&')}` : pathPart
+    }
 
     // 根据用户要求，视频链接组合方式为: BASE_URL + "?" + "token=" + token + "&idx=1" + 原有参数
     if (isVideo) {
@@ -704,6 +716,7 @@ class SnsService {
                     url: urlMatch ? urlMatch[1].trim() : '',
                     thumb: thumbMatch ? thumbMatch[1].trim() : '',
                     token: urlToken || thumbToken,
+                    thumbToken: thumbToken,
                     key: urlKey || thumbKey,
                     md5: urlMd5,
                     encIdx: urlEncIdx || thumbEncIdx
@@ -716,19 +729,24 @@ class SnsService {
                     const lpUrlTag = lx.match(/<url([^>]*)>/i)
                     const lpThumb = lx.match(/<thumb[^>]*>([^<]+)<\/thumb>/i)
                     const lpThumbTag = lx.match(/<thumb([^>]*)>/i)
-                    let lpToken: string | undefined, lpKey: string | undefined, lpEncIdx: string | undefined
+                    let lpUrlToken: string | undefined, lpThumbToken: string | undefined
+                    let lpKey: string | undefined, lpEncIdx: string | undefined
                     if (lpUrlTag?.[1]) {
                         const a = lpUrlTag[1]
-                        lpToken = a.match(/token="([^"]+)"/i)?.[1]
+                        lpUrlToken = a.match(/token="([^"]+)"/i)?.[1]
                         lpKey = a.match(/key="([^"]+)"/i)?.[1]
                         lpEncIdx = a.match(/enc_idx="([^"]+)"/i)?.[1]
                     }
-                    if (!lpToken && lpThumbTag?.[1]) lpToken = lpThumbTag[1].match(/token="([^"]+)"/i)?.[1]
-                    if (!lpKey && lpThumbTag?.[1]) lpKey = lpThumbTag[1].match(/key="([^"]+)"/i)?.[1]
+                    if (lpThumbTag?.[1]) {
+                        const a = lpThumbTag[1]
+                        lpThumbToken = a.match(/token="([^"]+)"/i)?.[1]
+                        if (!lpKey) lpKey = a.match(/key="([^"]+)"/i)?.[1]
+                    }
                     item.livePhoto = {
                         url: lpUrl ? lpUrl[1].trim() : '',
                         thumb: lpThumb ? lpThumb[1].trim() : '',
-                        token: lpToken,
+                        token: lpUrlToken || lpThumbToken,
+                        thumbToken: lpThumbToken,
                         key: lpKey,
                         encIdx: lpEncIdx
                     }
@@ -1181,16 +1199,18 @@ class SnsService {
 
             const fixedMedia = (post.media || []).map((m: any) => ({
                 url: fixSnsUrl(m.url, m.token, isVideoPost),
-                thumb: fixSnsUrl(m.thumb, m.token, false),
+                thumb: fixSnsUrl(m.thumb, m.thumbToken || m.token, false),
                 md5: m.md5,
                 token: m.token,
+                thumbToken: m.thumbToken,
                 key: isVideoPost ? (videoKey || m.key) : m.key,
                 encIdx: m.encIdx || m.enc_idx,
                 livePhoto: m.livePhoto ? {
                     ...m.livePhoto,
                     url: fixSnsUrl(m.livePhoto.url, m.livePhoto.token, true),
-                    thumb: fixSnsUrl(m.livePhoto.thumb, m.livePhoto.token, false),
+                    thumb: fixSnsUrl(m.livePhoto.thumb, m.livePhoto.thumbToken || m.livePhoto.token, false),
                     token: m.livePhoto.token,
+                    thumbToken: m.livePhoto.thumbToken,
                     key: videoKey || m.livePhoto.key || m.key,
                     encIdx: m.livePhoto.encIdx || m.livePhoto.enc_idx
                 } : undefined
@@ -2060,6 +2080,8 @@ window.addEventListener('scroll',function(){document.getElementById('btt').class
                 const zlib = require('zlib')
                 const urlObj = new URL(url)
 
+                console.log(`[SnsService] 开始下载图片: url=${url.substring(0, 100)}..., key=${key || 'undefined'}`)
+
                 const options = {
                     hostname: urlObj.hostname,
                     path: urlObj.pathname + urlObj.search,
@@ -2074,7 +2096,9 @@ window.addEventListener('scroll',function(){document.getElementById('btt').class
                 }
 
                 const req = https.request(options, (res: any) => {
+                    console.log(`[SnsService] CDN 响应: statusCode=${res.statusCode}, x-enc=${res.headers['x-enc']}, content-type=${res.headers['content-type']}`)
                     if (res.statusCode !== 200 && res.statusCode !== 206) {
+                        console.error(`[SnsService] CDN 请求失败: HTTP ${res.statusCode}`)
                         resolve({ success: false, error: `HTTP ${res.statusCode}` })
                         return
                     }
@@ -2094,9 +2118,11 @@ window.addEventListener('scroll',function(){document.getElementById('btt').class
 
                         let decoded = raw
                         const rawMagicMime = detectImageMime(raw, '')
+                        console.log(`[SnsService] 原始数据: size=${raw.length}, mime=${rawMagicMime}, xEnc=${xEnc}`)
 
                         // 图片逻辑
                         const shouldDecrypt = (xEnc === '1' || !!key) && key !== undefined && key !== null && String(key).trim().length > 0
+                        console.log(`[SnsService] 解密判断: shouldDecrypt=${shouldDecrypt}, key=${key || 'undefined'}`)
                         if (shouldDecrypt) {
                             try {
                                 const keyStr = String(key).trim()
@@ -2112,6 +2138,7 @@ window.addEventListener('scroll',function(){document.getElementById('btt').class
                                     }
 
                                     const decryptedMagicMime = detectImageMime(decrypted, '')
+                                    console.log(`[SnsService] 解密后: mime=${decryptedMagicMime}`)
                                     if (decryptedMagicMime.startsWith('image/')) {
                                         decoded = decrypted
                                     } else if (!rawMagicMime.startsWith('image/')) {
@@ -2124,7 +2151,9 @@ window.addEventListener('scroll',function(){document.getElementById('btt').class
                         }
 
                         const decodedMagicMime = detectImageMime(decoded, '')
+                        console.log(`[SnsService] 最终结果: mime=${decodedMagicMime}, isImage=${decodedMagicMime.startsWith('image/')}`)
                         if (!decodedMagicMime.startsWith('image/')) {
+                            console.error(`[SnsService] 图片解密失败: 原始mime=${rawMagicMime}, 解密后mime=${decodedMagicMime}, key=${key}`)
                             resolve({ success: false, error: '图片解密失败：无法识别图片格式' })
                             return
                         }

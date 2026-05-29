@@ -460,6 +460,7 @@ export class BackupService {
     const dbStorage = join(accountDir, 'db_storage')
     if (!existsSync(dbStorage)) return { success: false, error: '未找到 db_storage 目录' }
 
+    const accountDirName = basename(accountDir)
     const opened = await withTimeout(
       wcdbService.open(accountDir, decryptKey),
       15000,
@@ -467,10 +468,10 @@ export class BackupService {
     )
     if (!opened) {
       const detail = await wcdbService.getLastInitError().catch(() => null)
-      return { success: false, error: detail || `目标账号 ${accountDirName} 数据库连接失败` }
+      return { success: false, error: detail || `目标账号 ${accountDir} 数据库连接失败` }
     }
 
-    return { success: true, wxid: accountDirName, dbPath, dbStorage }
+    return { success: true, wxid: accountDir, dbPath, dbStorage }
   }
 
   private buildDbId(kind: BackupDbKind, index: number, dbPath: string): string {
@@ -857,10 +858,13 @@ export class BackupService {
       if (!existsSync(manifestPath)) return { success: false, error: '备份包缺少 manifest.json' }
       const manifest = JSON.parse(await readFileAsync(manifestPath, 'utf8')) as BackupManifest
       if (manifest?.type !== 'weflow-db-snapshots' || manifest.version !== 1) {
+        emitBackupProgress({ phase: 'failed', message: '不支持的备份包格式' })
         return { success: false, error: '不支持的备份包格式' }
       }
+      emitBackupProgress({ phase: 'done', message: '备份包已读取' })
       return { success: true, manifest }
     } catch (e) {
+      emitBackupProgress({ phase: 'failed', message: e instanceof Error ? e.message : String(e) })
       return { success: false, error: e instanceof Error ? e.message : String(e) }
     } finally {
       if (extractDir) {

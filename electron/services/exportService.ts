@@ -323,13 +323,21 @@ class ExportService {
     return error
   }
 
-  setRuntimeConfig(config: { dbPath?: string; decryptKey?: string; myWxid?: string; imageXorKey?: unknown; imageAesKey?: string } | null): void {
+  setRuntimeConfig(config: { dbPath?: string; decryptKey?: string; myWxid?: string; imageXorKey?: unknown; imageAesKey?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean } | null): void {
     this.runtimeConfig = config
     imageDecryptService.setRuntimeConfig({
       dbPath: config?.dbPath,
       myWxid: config?.myWxid,
       imageXorKey: config?.imageXorKey,
       imageAesKey: config?.imageAesKey
+    })
+    chatService.setRuntimeConfig({
+      dbPath: config?.dbPath,
+      decryptKey: config?.decryptKey,
+      myWxid: config?.myWxid,
+      resourcesPath: config?.resourcesPath,
+      appPath: config?.appPath,
+      isPackaged: config?.isPackaged
     })
   }
 
@@ -6651,7 +6659,7 @@ class ExportService {
         if (msg.localType === 34 && options.exportVoiceAsText) {
           // 使用预先转写的文字
           content = voiceTranscriptMap.get(this.getStableMessageKey(msg)) || '[语音消息 - 转文字失败]'
-        } else if (mediaItem && msg.localType === 3) {
+        } else if (mediaItem && msg.localType !== 47) {
           content = mediaItem.relativePath
         } else {
           content = this.parseMessageContent(

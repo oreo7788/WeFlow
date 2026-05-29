@@ -137,7 +137,25 @@ export class DbPathService {
   }
 
   /**
-   * 查找账号目录（包含 db_storage 或图片目录）
+   * 查找 dbPath 根目录下所有"看起来像账号目录"的子目录名。
+   *
+   * ## 修复 #996（错误码 -3001：未找到数据库目录）
+   *
+   * ### 旧实现的过滤逻辑及缺陷
+   * 旧实现对名字以 `wxid_` 开头的目录额外加了一道判断：
+   *   "段数（按下划线切分）必须 ≥ 3，否则跳过"
+   * 也就是 `wxid_X_<suffix>` 才算合法、`wxid_X` 一律忽略。
+   *
+   * 这种粗暴过滤会**误伤未自定义微信号的普通用户**——他们的真实账号目录
+   * 就叫 `wxid_X`（没有任何数字后缀），结果在欢迎页扫描时压根看不到自己。
+   *
+   * ### 修复策略
+   * 1. **不再依据"段数"过滤**：先按是否真的是账号目录（含 db_storage 或
+   *    FileStorage/Image[2]）一视同仁地收集所有候选；
+   * 2. **用 {@link dedupeAccountDirs} 做更精准的去重**：仅当 `wxid_X` 和
+   *    `wxid_X_<suffix>` 同时存在时（这是自定义微信号后微信遗留旧空目录
+   *    的典型场景），才二选一保留"更像微信实际在用"的那个，避免下拉框里
+   *    出现两个看起来一样但只有一个能用的混乱选项。
    */
   findAccountDirs(rootPath: string): string[] {
     const resolvedRootPath = expandHomePath(rootPath)
@@ -160,23 +178,93 @@ export class DbPathService {
 
           // 检查是否有有效账号目录结构
           if (this.isAccountDir(entryPath)) {
-            // 过滤掉不带后缀的 wxid_ 目录
-            const lowerEntry = entry.toLowerCase()
-            if (lowerEntry.startsWith('wxid_')) {
-              // wxid_ 开头的目录必须带后缀（wxid_xxx_yyyy 格式）
-              const parts = entry.split('_')
-              if (parts.length <= 2) {
-                // wxid_xxx 格式，跳过
-                continue
-              }
-            }
             accounts.push(entry)
           }
         }
       }
     } catch { }
 
-    return accounts
+    return this.dedupeAccountDirs(resolvedRootPath, accounts)
+  }
+
+  /**
+   * 账号目录去重：仅当存在"前缀-后缀变体对"时（即同时出现 `wxid_X` 与
+   * `wxid_X_<suffix>`），才二选一保留"微信实际在用"的那个目录。
+   *
+   * - 仅有一个候选目录时，原样返回，不做任何处理；
+   * - 没有匹配到变体对的目录也都保留（互不相关的多账号场景）；
+   * - 真正二选一时由 {@link shouldPreferSuffixedDir} 决定胜负。
+   */
+  private dedupeAccountDirs(rootPath: string, names: string[]): string[] {
+    if (names.length <= 1) return names.slice()
+
+    const lowered = names.map(n => n.toLowerCase())
+    const toSkip = new Set<string>()
+
+    // O(n^2) 双层循环找出所有"前缀-后缀变体对"。账号数极少，性能可忽略。
+    for (let i = 0; i < names.length; i++) {
+      for (let j = 0; j < names.length; j++) {
+        if (i === j) continue
+        // 判定 names[j] 是 names[i] 的"带后缀变体"：以 `<i>_` 开头
+        if (lowered[j].startsWith(lowered[i] + '_')) {
+          const baseName = names[i]
+          const suffixedName = names[j]
+          if (this.shouldPreferSuffixedDir(rootPath, baseName, suffixedName)) {
+            toSkip.add(baseName)        // 留 suffixedName，去掉无后缀的旧目录
+          } else {
+            toSkip.add(suffixedName)    // 反之亦然
+          }
+        }
+      }
+    }
+
+    return names.filter(n => !toSkip.has(n))
+  }
+
+  /**
+   * 在"无后缀目录"与"带后缀目录"之间二选一时，判定后者是否应该胜出。
+   *
+   * 优先级（从高到低）：
+   *   1) 谁含有 session.db 谁优先 —— 这是"数据真实写入"最强的信号；
+   *   2) 都含或都不含 session.db 时，比较修改时间，更新的优先；
+   *   3) 兜底返回 true，即默认保留带后缀的目录（与微信 4.x 自定义微信号
+   *      后真实目录命名一致）。
+   */
+  private shouldPreferSuffixedDir(rootPath: string, baseName: string, suffixedName: string): boolean {
+    const basePath = join(rootPath, baseName)
+    const suffixedPath = join(rootPath, suffixedName)
+
+    const baseHasSession = this.hasSessionDb(basePath)
+    const suffixedHasSession = this.hasSessionDb(suffixedPath)
+    if (baseHasSession !== suffixedHasSession) {
+      return suffixedHasSession
+    }
+
+    const baseTime = this.getAccountModifiedTime(basePath)
+    const suffixedTime = this.getAccountModifiedTime(suffixedPath)
+    if (baseTime !== suffixedTime) {
+      return suffixedTime >= baseTime
+    }
+
+    return true
+  }
+
+  /**
+   * 浅层检测账号目录下是否存在 session.db（"数据是否真实写入"的判据）。
+   *
+   * 仅检测两条已知路径，不做深度递归，避免在大目录上拖慢扫描：
+   *   - db_storage/session/session.db （新版本嵌套布局）
+   *   - db_storage/session.db          （部分版本扁平布局）
+   */
+  private hasSessionDb(accountDir: string): boolean {
+    const candidates = [
+      join(accountDir, 'db_storage', 'session', 'session.db'),
+      join(accountDir, 'db_storage', 'session.db'),
+    ]
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) return true
+    }
+    return false
   }
 
   private isAccountDir(entryPath: string): boolean {
@@ -225,7 +313,20 @@ export class DbPathService {
   }
 
   /**
-   * 扫描目录名候选（仅包含下划线的文件夹，排除 all_users）
+   * 扫描 dbPath 下"目录名包含下划线"的文件夹作为 wxid 候选。
+   * 与 {@link findAccountDirs} 的区别：本方法不要求目录里真的有 db_storage/
+   * FileStorage，仅按命名特征判断，结果会暴露给"手动选择 wxid"的弹窗使用。
+   *
+   * ## 修复 #996（错误码 -3001：未找到数据库目录）
+   *
+   * 旧实现对 `wxid_` 开头的目录额外要求"段数 ≥ 3"才放行，会误伤未自定义
+   * 微信号的普通用户（他们的真实目录就叫 `wxid_X`）。现在改为不再依据段数
+   * 过滤，并在末尾通过 {@link dedupeAccountDirs} 处理 `wxid_X` 与
+   * `wxid_X_<suffix>` 同时存在的去重场景。
+   *
+   * 排除规则保留：
+   *   - 微信本身的非账号目录（如 `all_users`）；
+   *   - 不含下划线的文件夹（不可能是 wxid）。
    */
   scanWxidCandidates(rootPath: string): WxidInfo[] {
     const resolvedRootPath = expandHomePath(rootPath)
@@ -243,15 +344,6 @@ export class DbPathService {
           if (lower === 'all_users') continue
           if (!entry.includes('_')) continue
 
-          // 过滤掉不带后缀的 wxid_ 目录
-          if (lower.startsWith('wxid_')) {
-            const parts = entry.split('_')
-            if (parts.length <= 2) {
-              // wxid_xxx 格式，跳过
-              continue
-            }
-          }
-
           wxids.push({ wxid: entry, modifiedTime: stat.mtimeMs })
         }
       }
@@ -266,7 +358,13 @@ export class DbPathService {
       }
     } catch { }
 
-    const sorted = wxids.sort((a, b) => {
+    // 修复 #996：对扫描到的 wxid 候选做去重，避免同时显示 wxid_X 与 wxid_X_<suffix>。
+    const dedupedNames = new Set(
+      this.dedupeAccountDirs(resolvedRootPath, wxids.map(w => w.wxid))
+    )
+    const deduped = wxids.filter(w => dedupedNames.has(w.wxid))
+
+    const sorted = deduped.sort((a, b) => {
       if (b.modifiedTime !== a.modifiedTime) return b.modifiedTime - a.modifiedTime
       return a.wxid.localeCompare(b.wxid)
     });

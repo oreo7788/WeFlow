@@ -1,5 +1,10 @@
 ﻿import { contextBridge, ipcRenderer } from 'electron'
 
+type CloseConfirmPayload = {
+  canMinimizeToTray: boolean
+  restoreMethod?: 'tray' | 'dock'
+}
+
 // 暴露给渲染进程的 API
 contextBridge.exposeInMainWorld('electronAPI', {
   // 配置
@@ -106,8 +111,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       return () => ipcRenderer.removeListener('window:maximizeStateChanged', listener)
     },
     close: () => ipcRenderer.send('window:close'),
-    onCloseConfirmRequested: (callback: (payload: { canMinimizeToTray: boolean }) => void) => {
-      const listener = (_: unknown, payload: { canMinimizeToTray: boolean }) => callback(payload)
+    onCloseConfirmRequested: (callback: (payload: CloseConfirmPayload) => void) => {
+      const listener = (_: unknown, payload: CloseConfirmPayload) => callback(payload)
       ipcRenderer.on('window:confirmCloseRequested', listener)
       return () => ipcRenderer.removeListener('window:confirmCloseRequested', listener)
     },
@@ -195,7 +200,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getSessionStatuses: (usernames: string[]) => ipcRenderer.invoke('chat:getSessionStatuses', usernames),
     getExportTabCounts: () => ipcRenderer.invoke('chat:getExportTabCounts'),
     getContactTypeCounts: () => ipcRenderer.invoke('chat:getContactTypeCounts'),
-    getSessionMessageCounts: (sessionIds: string[]) => ipcRenderer.invoke('chat:getSessionMessageCounts', sessionIds),
+    getSessionMessageCounts: (sessionIds: string[], options?: { preferHintCache?: boolean; bypassSessionCache?: boolean }) => ipcRenderer.invoke('chat:getSessionMessageCounts', sessionIds, options),
     enrichSessionsContactInfo: (
       usernames: string[],
       options?: { skipDisplayName?: boolean; onlyMissingAvatar?: boolean }
@@ -394,6 +399,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getContactRankings: (limit?: number, beginTimestamp?: number, endTimestamp?: number) =>
       ipcRenderer.invoke('analytics:getContactRankings', limit, beginTimestamp, endTimestamp),
     getTimeDistribution: () => ipcRenderer.invoke('analytics:getTimeDistribution'),
+    getSelfSentDailyDistribution: (beginTimestamp?: number, endTimestamp?: number, force?: boolean) =>
+      ipcRenderer.invoke('analytics:getSelfSentDailyDistribution', beginTimestamp, endTimestamp, force),
     getExcludedUsernames: () => ipcRenderer.invoke('analytics:getExcludedUsernames'),
     setExcludedUsernames: (usernames: string[]) => ipcRenderer.invoke('analytics:setExcludedUsernames', usernames),
     getExcludeCandidates: () => ipcRenderer.invoke('analytics:getExcludeCandidates'),
@@ -583,6 +590,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     markRecordRead: (id: string) => ipcRenderer.invoke('insight:markRecordRead', id),
     clearRecords: (filters?: any) => ipcRenderer.invoke('insight:clearRecords', filters),
     triggerTest: () => ipcRenderer.invoke('insight:triggerTest'),
+    triggerSessionInsight: (payload: {
+      sessionId: string
+      displayName?: string
+      avatarUrl?: string
+    }) => ipcRenderer.invoke('insight:triggerSessionInsight', payload),
+    listProfileStatuses: (sessionIds: string[]) => ipcRenderer.invoke('insight:listProfileStatuses', sessionIds),
+    generateProfile: (payload: {
+      sessionId: string
+      displayName?: string
+      avatarUrl?: string
+    }) => ipcRenderer.invoke('insight:generateProfile', payload),
+    cancelProfile: (sessionId?: string) => ipcRenderer.invoke('insight:cancelProfile', sessionId),
     generateFootprintInsight: (payload: {
       rangeLabel: string
       summary: {
@@ -595,7 +614,37 @@ contextBridge.exposeInMainWorld('electronAPI', {
       }
       privateSegments?: Array<{ displayName?: string; session_id?: string; incoming_count?: number; outgoing_count?: number; message_count?: number; replied?: boolean }>
       mentionGroups?: Array<{ displayName?: string; session_id?: string; count?: number }>
-    }) => ipcRenderer.invoke('insight:generateFootprintInsight', payload)
+    }) => ipcRenderer.invoke('insight:generateFootprintInsight', payload),
+    generateMessageInsight: (payload: {
+      sessionId: string
+      displayName?: string
+      avatarUrl?: string
+      targetLocalId?: number
+      targetCreateTime?: number
+      targetMessageKey?: string
+      targetText: string
+      targetSenderName?: string
+      contextCount?: number
+      forceRefresh?: boolean
+    }) => ipcRenderer.invoke('insight:generateMessageInsight', payload)
+  },
+
+  groupSummary: {
+    listRecords: (filters?: any) => ipcRenderer.invoke('groupSummary:listRecords', filters),
+    getRecord: (id: string) => ipcRenderer.invoke('groupSummary:getRecord', id),
+    triggerManual: (payload: {
+      sessionId: string
+      displayName?: string
+      avatarUrl?: string
+      startTime: number
+      endTime: number
+    }) => ipcRenderer.invoke('groupSummary:triggerManual', payload),
+    triggerDay: (payload: {
+      sessionId: string
+      displayName?: string
+      avatarUrl?: string
+      date: string
+    }) => ipcRenderer.invoke('groupSummary:triggerDay', payload)
   },
 
   social: {

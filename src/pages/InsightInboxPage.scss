@@ -265,6 +265,25 @@
     color: #5b55a0;
     background: rgba(99, 102, 241, 0.12);
   }
+
+  &.manual {
+    color: #0f766e;
+    background: rgba(20, 184, 166, 0.13);
+  }
+}
+
+.insight-source-pill {
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: rgba(91, 147, 144, 0.1);
+  color: var(--primary);
+  font-size: 12px;
+  white-space: nowrap;
+
+  &.message_analysis {
+    background: rgba(245, 158, 11, 0.13);
+    color: #8a5a00;
+  }
 }
 
 .insight-time {
@@ -280,6 +299,43 @@
   line-height: 1.66;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.message-analysis-target {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.message-analysis-target-label {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  font-weight: 700;
+}
+
+.message-analysis-target-text {
+  min-width: 0;
+  word-break: break-word;
+}
+
+.message-analysis-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+
+  span {
+    border-radius: 6px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    padding: 4px 7px;
+    font-size: 12px;
+  }
 }
 
 .insight-filter-panel {
@@ -361,6 +417,28 @@
 
   button {
     height: 34px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 13px;
+
+    &.active {
+      border-color: var(--primary);
+      color: var(--primary);
+      background: rgba(91, 147, 144, 0.08);
+    }
+  }
+}
+
+.insight-source-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+
+  button {
+    min-height: 34px;
     border: 1px solid var(--border-color);
     border-radius: 8px;
     background: var(--bg-primary);

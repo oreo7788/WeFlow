@@ -1,5 +1,6 @@
 import { join, dirname, basename, extname } from 'path'
 import { existsSync, mkdirSync, readdirSync, statSync, readFileSync, writeFileSync, copyFileSync, unlinkSync, watch, promises as fsPromises } from 'fs'
+import { createRequire } from 'module'
 import * as path from 'path'
 import * as fs from 'fs'
 import * as https from 'https'
@@ -453,7 +454,7 @@ class ChatService {
     this.voiceTranscriptCache = new LRUCache(1000) // 最多缓存1000条转写记录
   }
 
-  setRuntimeConfig(config: { dbPath?: string; decryptKey?: string; myWxid?: string }): void {
+  setRuntimeConfig(config: { dbPath?: string; decryptKey?: string; myWxid?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean }): void {
     this.runtimeConfig = config
   }
 
@@ -2582,6 +2583,93 @@ class ChatService {
     } catch (e) {
       console.error('ChatService: 获取最新消息失败:', e)
       return { success: false, error: String(e) }
+    }
+  }
+
+  async getMessagesAround(
+    sessionId: string,
+    target: { localId?: number; createTime: number; messageKey?: string },
+    totalContextCount: number = 50
+  ): Promise<{
+    success: boolean
+    before: Message[]
+    after: Message[]
+    requested: number
+    error?: string
+  }> {
+    const requested = Math.max(1, Math.min(200, Math.floor(Number(totalContextCount) || 50)))
+    const targetCreateTime = Math.floor(Number(target?.createTime || 0))
+    if (!sessionId || targetCreateTime <= 0) {
+      return { success: false, before: [], after: [], requested, error: '无效的目标消息' }
+    }
+
+    const collect = async (ascending: boolean): Promise<Message[]> => {
+      let cursor: number | undefined
+      try {
+        const cursorResult = await wcdbService.openMessageCursorLite(
+          sessionId,
+          Math.min(240, Math.max(60, requested + 20)),
+          ascending,
+          ascending ? targetCreateTime : 0,
+          ascending ? 0 : targetCreateTime + 1
+        )
+        if (!cursorResult.success || !cursorResult.cursor) {
+          throw new Error(cursorResult.error || '打开消息游标失败')
+        }
+        cursor = cursorResult.cursor
+        const collected = await this.collectVisibleMessagesFromCursor(sessionId, cursor, requested + 1)
+        if (!collected.success) {
+          throw new Error(collected.error || '读取上下文消息失败')
+        }
+        const targetLocalId = Math.floor(Number(target?.localId || 0))
+        const targetMessageKey = String(target?.messageKey || '').trim()
+        return (collected.messages || []).filter((message) => {
+          const sameLocalId = targetLocalId > 0 && Number(message.localId || 0) === targetLocalId
+          const sameCreateTime = Number(message.createTime || 0) === targetCreateTime
+          const sameKey = Boolean(targetMessageKey && message.messageKey === targetMessageKey)
+          return !(sameKey || (sameLocalId && sameCreateTime))
+        })
+      } finally {
+        if (cursor) {
+          await wcdbService.closeMessageCursor(cursor).catch(() => {})
+        }
+      }
+    }
+
+    try {
+      const [beforeCandidatesRaw, afterCandidatesRaw] = await Promise.all([
+        collect(false),
+        collect(true)
+      ])
+      const beforeCandidates = beforeCandidatesRaw
+        .filter((message) => Number(message.createTime || 0) <= targetCreateTime)
+        .sort((a, b) => (a.createTime - b.createTime) || (a.sortSeq - b.sortSeq))
+      const afterCandidates = afterCandidatesRaw
+        .filter((message) => Number(message.createTime || 0) >= targetCreateTime)
+        .sort((a, b) => (a.createTime - b.createTime) || (a.sortSeq - b.sortSeq))
+
+      const baseBefore = Math.floor(requested / 2)
+      const baseAfter = requested - baseBefore
+      const takeAfter = Math.min(baseAfter, afterCandidates.length)
+      const takeBefore = Math.min(requested - takeAfter, beforeCandidates.length)
+      const remainingAfter = Math.max(0, requested - takeBefore - takeAfter)
+      const finalAfter = Math.min(afterCandidates.length, takeAfter + remainingAfter)
+      const finalBefore = Math.min(beforeCandidates.length, requested - finalAfter)
+
+      return {
+        success: true,
+        before: beforeCandidates.slice(Math.max(0, beforeCandidates.length - finalBefore)),
+        after: afterCandidates.slice(0, finalAfter),
+        requested
+      }
+    } catch (error) {
+      return {
+        success: false,
+        before: [],
+        after: [],
+        requested,
+        error: (error as Error).message || String(error)
+      }
     }
   }
 
@@ -8613,13 +8701,17 @@ class ChatService {
   private async decodeSilkToPcm(silkData: Buffer, sampleRate: number): Promise<Buffer | null> {
     try {
       let wasmPath: string
-      if (app.isPackaged) {
-        wasmPath = join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'silk-wasm', 'lib', 'silk.wasm')
+      const isPackaged = this.runtimeConfig?.isPackaged ?? app.isPackaged
+      const resourcesPath = this.runtimeConfig?.resourcesPath ?? process.resourcesPath
+      const appPath = this.runtimeConfig?.appPath ?? app.getAppPath()
+
+      if (isPackaged) {
+        wasmPath = join(resourcesPath, 'app.asar.unpacked', 'node_modules', 'silk-wasm', 'lib', 'silk.wasm')
         if (!existsSync(wasmPath)) {
-          wasmPath = join(process.resourcesPath, 'node_modules', 'silk-wasm', 'lib', 'silk.wasm')
+          wasmPath = join(resourcesPath, 'node_modules', 'silk-wasm', 'lib', 'silk.wasm')
         }
       } else {
-        wasmPath = join(app.getAppPath(), 'node_modules', 'silk-wasm', 'lib', 'silk.wasm')
+        wasmPath = join(appPath, 'node_modules', 'silk-wasm', 'lib', 'silk.wasm')
       }
 
       if (!existsSync(wasmPath)) {
@@ -8627,7 +8719,9 @@ class ChatService {
         return null
       }
 
-      const silkWasm = require('silk-wasm')
+      // 在 worker 环境中使用 createRequire 来正确加载模块
+      const requireFromApp = createRequire(join(appPath, 'package.json'))
+      const silkWasm = requireFromApp('silk-wasm')
       if (!silkWasm || !silkWasm.decode) {
         console.error('[ChatService][Voice] silk-wasm module invalid')
         return null
@@ -9456,12 +9550,13 @@ class ChatService {
 
       data = this.filterMyFootprintMentionsBySource(nativeRaw, myWxid, mentionLimit)
 
-      if (privateSessionIds.length > 0 && data.private_segments.length === 0) {
+      if (data.private_sessions.length > 0) {
+        const sessionsWithMessages = data.private_sessions.map(s => s.session_id)
         const privateSegments = await this.rebuildMyFootprintPrivateSegments({
           begin,
           end: normalizedEnd,
           myWxid,
-          privateSessionIds
+          privateSessionIds: sessionsWithMessages
         })
         if (privateSegments.length > 0) {
           data = {
@@ -9561,7 +9656,7 @@ class ChatService {
     myWxid: string
     privateSessionIds: string[]
   }): Promise<MyFootprintPrivateSegment[]> {
-    const sessionGapSeconds = 10 * 60
+    const sessionGapSeconds = 5 * 60
     const segments: MyFootprintPrivateSegment[] = []
 
     type WorkingSegment = {
@@ -9579,14 +9674,17 @@ class ChatService {
     }
 
     for (const sessionId of params.privateSessionIds) {
-      const cursorResult = await wcdbService.openMessageCursorLite(
+      const cursorResult = await wcdbService.openMessageCursor(
         sessionId,
         360,
         true,
-        params.begin,
-        params.end
+        0,
+        0
       )
-      if (!cursorResult.success || !cursorResult.cursor) continue
+      if (!cursorResult.success || !cursorResult.cursor) {
+        console.log(`[足迹分段] 打开游标失败: ${sessionId}, 原因: ${cursorResult.error || '未知'}`)
+        continue
+      }
 
       let segmentCursor = 0
       let active: WorkingSegment | null = null
@@ -9620,19 +9718,30 @@ class ChatService {
       }
 
       let hasMore = true
+      let batchCount = 0
+      let totalMessages = 0
       try {
         while (hasMore) {
           const batchResult = await wcdbService.fetchMessageBatch(cursorResult.cursor)
+          batchCount++
           if (!batchResult.success || !Array.isArray(batchResult.rows)) break
           hasMore = Boolean(batchResult.hasMore)
+          totalMessages += batchResult.rows.length
 
           for (const row of batchResult.rows as Array<Record<string, any>>) {
             const createTime = this.toSafeInt(row.create_time, 0)
             const localId = this.toSafeInt(row.local_id, 0)
             const isSend = this.resolveFootprintRowIsSend(row, params.myWxid)
 
+            // 过滤时间范围外的消息
+            if (createTime > 0 && (createTime < params.begin || createTime > params.end)) {
+              continue
+            }
+
             if (createTime > 0) {
-              const needNew = !active || (lastMessageTs > 0 && createTime - lastMessageTs > sessionGapSeconds)
+              const referenceTs = lastMessageTs > 0 ? lastMessageTs : (active ? active.end_ts : 0)
+              const timeDiff = referenceTs > 0 ? createTime - referenceTs : 0
+              const needNew = !active || (referenceTs > 0 && timeDiff > sessionGapSeconds)
               if (needNew) {
                 commit()
                 segmentCursor += 1

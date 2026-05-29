@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Search, MessageSquare, AlertCircle, Loader2, RefreshCw, X, ChevronDown, ChevronLeft, Info, Calendar, Database, Hash, Play, Pause, Image as ImageIcon, Mic, CheckCircle, Copy, Check, CheckSquare, Download, BarChart3, Edit2, Trash2, BellOff, Users, FolderClosed, UserCheck, Crown, Aperture, Newspaper } from 'lucide-react'
+import { Search, MessageSquare, AlertCircle, Loader2, RefreshCw, X, ChevronDown, ChevronLeft, Info, Calendar, Database, Hash, Play, Pause, Image as ImageIcon, Mic, CheckCircle, Copy, Check, CheckSquare, Download, BarChart3, Edit2, Trash2, BellOff, Users, FolderClosed, UserCheck, Crown, Aperture, Newspaper, Star, Sparkles, Code2 } from 'lucide-react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { createPortal } from 'react-dom'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
@@ -8,6 +8,7 @@ import { useChatStore } from '../stores/chatStore'
 import { useBatchTranscribeStore, type BatchVoiceTaskType } from '../stores/batchTranscribeStore'
 import { useBatchImageDecryptStore } from '../stores/batchImageDecryptStore'
 import type { ChatRecordItem, ChatSession, Message } from '../types/models'
+import type { GroupSummaryRecord, GroupSummaryRecordSummary } from '../types/electron'
 import { getEmojiPath } from 'wechat-emojis'
 import { VoiceTranscribeDialog } from '../components/VoiceTranscribeDialog'
 import { LivePhotoIcon } from '../components/LivePhotoIcon'
@@ -68,6 +69,7 @@ interface QuotedMessageJumpTarget {
 
 type GlobalMsgSearchPhase = 'idle' | 'seed' | 'backfill' | 'done'
 type GlobalMsgSearchResult = Message & { sessionId: string }
+type GroupSummaryRangeMode = 1 | 2 | 4 | 8 | 12 | 24
 
 interface GlobalMsgPrefixCacheEntry {
   keyword: string
@@ -760,6 +762,17 @@ function formatYmdHmDateTime(timestamp?: number): string {
   const h = `${d.getHours()}`.padStart(2, '0')
   const min = `${d.getMinutes()}`.padStart(2, '0')
   return `${y}-${m}-${day} ${h}:${min}`
+}
+
+function formatDateInputLocal(date: Date): string {
+  const y = date.getFullYear()
+  const m = `${date.getMonth() + 1}`.padStart(2, '0')
+  const day = `${date.getDate()}`.padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+function formatSummaryPeriod(start: number, end: number): string {
+  return `${formatYmdHmDateTime(start * 1000)} - ${formatYmdHmDateTime(end * 1000)}`
 }
 
 interface ChatPageProps {
@@ -1476,6 +1489,7 @@ function ChatPage(props: ChatPageProps) {
   const sessionListRef = useRef<HTMLDivElement>(null)
   const jumpCalendarWrapRef = useRef<HTMLDivElement>(null)
   const jumpPopoverPortalRef = useRef<HTMLDivElement>(null)
+  const groupSummaryDateWrapRef = useRef<HTMLDivElement>(null)
   const [currentOffset, setCurrentOffset] = useState(0)
   const [jumpStartTime, setJumpStartTime] = useState(0)
   const [jumpEndTime, setJumpEndTime] = useState(0)
@@ -1537,6 +1551,18 @@ function ChatPage(props: ChatPageProps) {
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, message: Message } | null>(null)
   const [showMessageInfo, setShowMessageInfo] = useState<Message | null>(null)
   const [editingMessage, setEditingMessage] = useState<{ message: Message, content: string } | null>(null)
+  const [aiGroupSummaryEnabled, setAiGroupSummaryEnabled] = useState(false)
+  const [showGroupSummaryPanel, setShowGroupSummaryPanel] = useState(false)
+  const [groupSummaryRecords, setGroupSummaryRecords] = useState<GroupSummaryRecordSummary[]>([])
+  const [groupSummaryTotal, setGroupSummaryTotal] = useState(0)
+  const [groupSummaryLoading, setGroupSummaryLoading] = useState(false)
+  const [groupSummaryError, setGroupSummaryError] = useState<string | null>(null)
+  const [groupSummaryDateFilter, setGroupSummaryDateFilter] = useState(() => formatDateInputLocal(new Date()))
+  const [groupSummaryRangeMode, setGroupSummaryRangeMode] = useState<GroupSummaryRangeMode>(4)
+  const [showGroupSummaryDatePopover, setShowGroupSummaryDatePopover] = useState(false)
+  const [isTriggeringGroupSummary, setIsTriggeringGroupSummary] = useState(false)
+  const [groupSummaryHint, setGroupSummaryHint] = useState<{ success: boolean; message: string } | null>(null)
+  const [groupSummaryLogRecord, setGroupSummaryLogRecord] = useState<GroupSummaryRecord | null>(null)
 
   // 多选模式
   const [isSelectionMode, setIsSelectionMode] = useState(false)
@@ -1637,6 +1663,11 @@ function ChatPage(props: ChatPageProps) {
 
 
   const highlightedMessageSet = useMemo(() => new Set(highlightedMessageKeys), [highlightedMessageKeys])
+  const [aiMessageInsightEnabled, setAiMessageInsightEnabled] = useState(false)
+  const [aiMessageInsightContextCount, setAiMessageInsightContextCount] = useState(50)
+  const [isTriggeringSessionInsight, setIsTriggeringSessionInsight] = useState(false)
+  const [sessionInsightHint, setSessionInsightHint] = useState<{ success: boolean; message: string } | null>(null)
+  const sessionInsightHintTimerRef = useRef<number | null>(null)
   const messageKeySetRef = useRef<Set<string>>(new Set())
   const lastMessageTimeRef = useRef(0)
   const isMessageListAtBottomRef = useRef(true)
@@ -1854,6 +1885,130 @@ function ChatPage(props: ChatPageProps) {
       if (prev.top === top && prev.left === left) return prev
       return { top, left }
     })
+  }, [])
+
+  const getGroupSummaryDateRangeSeconds = useCallback((dateValue = groupSummaryDateFilter) => {
+    const date = dateValue || formatDateInputLocal(new Date())
+    const start = new Date(`${date}T00:00:00`)
+    if (!Number.isFinite(start.getTime())) {
+      const fallback = new Date()
+      fallback.setHours(0, 0, 0, 0)
+      const fallbackEnd = new Date(fallback)
+      fallbackEnd.setHours(23, 59, 59, 999)
+      return { startTime: Math.floor(fallback.getTime() / 1000), endTime: Math.floor(fallbackEnd.getTime() / 1000) }
+    }
+    const end = new Date(start)
+    end.setHours(23, 59, 59, 999)
+    return { startTime: Math.floor(start.getTime() / 1000), endTime: Math.floor(end.getTime() / 1000) }
+  }, [groupSummaryDateFilter])
+
+  const isGroupSummaryToday = useMemo(() => {
+    return (groupSummaryDateFilter || formatDateInputLocal(new Date())) === formatDateInputLocal(new Date())
+  }, [groupSummaryDateFilter])
+
+  const loadGroupSummaryRecords = useCallback(async (sessionId?: string) => {
+    const targetSessionId = String(sessionId || currentSessionRef.current || '').trim()
+    if (!targetSessionId || !targetSessionId.endsWith('@chatroom')) return
+    const { startTime, endTime } = getGroupSummaryDateRangeSeconds()
+    setGroupSummaryLoading(true)
+    setGroupSummaryError(null)
+    try {
+      const result = await window.electronAPI.groupSummary.listRecords({
+        sessionId: targetSessionId,
+        startTime,
+        endTime,
+        limit: 100
+      })
+      if (currentSessionRef.current !== targetSessionId) return
+      if (!result.success) {
+        setGroupSummaryRecords([])
+        setGroupSummaryTotal(0)
+        setGroupSummaryError(result.error || '读取群聊总结失败')
+        return
+      }
+      setGroupSummaryRecords(result.records || [])
+      setGroupSummaryTotal(result.total || 0)
+    } catch (error) {
+      if (currentSessionRef.current !== targetSessionId) return
+      setGroupSummaryRecords([])
+      setGroupSummaryTotal(0)
+      setGroupSummaryError((error as Error).message || String(error))
+    } finally {
+      if (currentSessionRef.current === targetSessionId) {
+        setGroupSummaryLoading(false)
+      }
+    }
+  }, [getGroupSummaryDateRangeSeconds])
+
+  const resolveTodayGroupSummaryManualRange = useCallback(() => {
+    const nowSeconds = Math.floor(Date.now() / 1000)
+    const hours = Number(groupSummaryRangeMode)
+    return { startTime: nowSeconds - hours * 60 * 60, endTime: nowSeconds }
+  }, [groupSummaryRangeMode])
+
+  const triggerManualGroupSummary = useCallback(async () => {
+    const sessionId = String(currentSessionId || '').trim()
+    if (!sessionId || !sessionId.endsWith('@chatroom')) return
+    const sessionInfo = sessionMapRef.current.get(sessionId)
+    const selectedDate = groupSummaryDateFilter || formatDateInputLocal(new Date())
+    const today = formatDateInputLocal(new Date())
+
+    setIsTriggeringGroupSummary(true)
+    setGroupSummaryHint({ success: true, message: '正在生成群聊总结...' })
+    try {
+      if (selectedDate === today) {
+        const { startTime, endTime } = resolveTodayGroupSummaryManualRange()
+        if (startTime <= 0 || endTime <= startTime) {
+          setGroupSummaryHint({ success: false, message: '请选择有效的总结时段' })
+          return
+        }
+        const result = await window.electronAPI.groupSummary.triggerManual({
+          sessionId,
+          displayName: sessionInfo?.displayName || sessionId,
+          avatarUrl: sessionInfo?.avatarUrl,
+          startTime,
+          endTime
+        })
+        if (result.success) {
+          setGroupSummaryHint({ success: true, message: result.message || '群聊总结已生成' })
+          if (!result.skipped) {
+            await loadGroupSummaryRecords(sessionId)
+          }
+        } else {
+          setGroupSummaryHint({ success: false, message: result.message || '群聊总结生成失败' })
+        }
+      } else {
+        const result = await window.electronAPI.groupSummary.triggerDay({
+          sessionId,
+          displayName: sessionInfo?.displayName || sessionId,
+          avatarUrl: sessionInfo?.avatarUrl,
+          date: selectedDate
+        })
+        if (result.success) {
+          setGroupSummaryHint({ success: true, message: result.message || '群聊总结已生成' })
+          await loadGroupSummaryRecords(sessionId)
+        } else {
+          setGroupSummaryHint({ success: false, message: result.message || '群聊总结生成失败' })
+        }
+      }
+    } catch (error) {
+      setGroupSummaryHint({ success: false, message: (error as Error).message || String(error) })
+    } finally {
+      setIsTriggeringGroupSummary(false)
+    }
+  }, [currentSessionId, groupSummaryDateFilter, loadGroupSummaryRecords, resolveTodayGroupSummaryManualRange])
+
+  const openGroupSummaryLog = useCallback(async (recordId: string) => {
+    try {
+      const result = await window.electronAPI.groupSummary.getRecord(recordId)
+      if (!result.success || !result.record) {
+        setGroupSummaryHint({ success: false, message: result.error || '读取总结日志失败' })
+        return
+      }
+      setGroupSummaryLogRecord(result.record)
+    } catch (error) {
+      setGroupSummaryHint({ success: false, message: (error as Error).message || String(error) })
+    }
   }, [])
 
   const handleToggleJumpPopover = useCallback(() => {
@@ -2898,8 +3053,20 @@ function ChatPage(props: ChatPageProps) {
       return
     }
     setShowDetailPanel(false)
+    setShowGroupSummaryPanel(false)
     setShowGroupMembersPanel(true)
   }, [currentSessionId, showGroupMembersPanel, isGroupChatSession])
+
+  const toggleGroupSummaryPanel = useCallback(() => {
+    if (!currentSessionId || !isGroupChatSession(currentSessionId) || !aiGroupSummaryEnabled) return
+    if (showGroupSummaryPanel) {
+      setShowGroupSummaryPanel(false)
+      return
+    }
+    setShowDetailPanel(false)
+    setShowGroupMembersPanel(false)
+    setShowGroupSummaryPanel(true)
+  }, [aiGroupSummaryEnabled, currentSessionId, showGroupSummaryPanel, isGroupChatSession])
 
   // 切换详情面板
   const toggleDetailPanel = useCallback(() => {
@@ -2908,6 +3075,7 @@ function ChatPage(props: ChatPageProps) {
       return
     }
     setShowGroupMembersPanel(false)
+    setShowGroupSummaryPanel(false)
     setShowDetailPanel(true)
     if (currentSessionId) {
       void loadSessionDetail(currentSessionId)
@@ -2923,6 +3091,15 @@ function ChatPage(props: ChatPageProps) {
     setGroupMemberSearchKeyword('')
     void loadGroupMembersPanel(currentSessionId)
   }, [showGroupMembersPanel, currentSessionId, loadGroupMembersPanel, isGroupChatSession])
+
+  useEffect(() => {
+    if (!showGroupSummaryPanel) return
+    if (!currentSessionId || !isGroupChatSession(currentSessionId) || !aiGroupSummaryEnabled) {
+      setShowGroupSummaryPanel(false)
+      return
+    }
+    void loadGroupSummaryRecords(currentSessionId)
+  }, [aiGroupSummaryEnabled, currentSessionId, groupSummaryDateFilter, loadGroupSummaryRecords, showGroupSummaryPanel, isGroupChatSession])
 
   useEffect(() => {
     const chatroomId = String(sessionDetail?.wxid || '').trim()
@@ -3005,6 +3182,10 @@ function ChatPage(props: ChatPageProps) {
     setIsLoadingRelationStats(false)
     setShowDetailPanel(false)
     setShowGroupMembersPanel(false)
+    setShowGroupSummaryPanel(false)
+    setGroupSummaryRecords([])
+    setGroupSummaryError(null)
+    setGroupSummaryHint(null)
     setGroupPanelMembers([])
     setGroupMembersError(null)
     setGroupMembersLoadingHint('')
@@ -3096,6 +3277,36 @@ function ChatPage(props: ChatPageProps) {
   }, [])
 
   useEffect(() => {
+    let canceled = false
+
+    const loadMessageInsightConfig = () => {
+      void Promise.all([
+        configService.getAiMessageInsightEnabled(),
+        configService.getAiMessageInsightContextCount()
+      ])
+        .then(([enabled, contextCount]) => {
+          if (canceled) return
+          setAiMessageInsightEnabled(enabled)
+          setAiMessageInsightContextCount(contextCount)
+        })
+        .catch((error) => {
+          console.warn('加载消息解析配置失败:', error)
+          if (canceled) return
+          setAiMessageInsightEnabled(false)
+          setAiMessageInsightContextCount(50)
+        })
+    }
+
+    loadMessageInsightConfig()
+    const handleFocus = () => loadMessageInsightConfig()
+    window.addEventListener('focus', handleFocus)
+    return () => {
+      canceled = true
+      window.removeEventListener('focus', handleFocus)
+    }
+  }, [])
+
+  useEffect(() => {
     let cancelled = false
     void (async () => {
       const scope = await resolveChatCacheScope()
@@ -3111,6 +3322,13 @@ function ChatPage(props: ChatPageProps) {
   // 同步 currentSessionId 到 ref
   useEffect(() => {
     currentSessionRef.current = currentSessionId
+    messageInsightMemoryCache.clear()
+    setSessionInsightHint(null)
+    setIsTriggeringSessionInsight(false)
+    if (sessionInsightHintTimerRef.current !== null) {
+      window.clearTimeout(sessionInsightHintTimerRef.current)
+      sessionInsightHintTimerRef.current = null
+    }
     isMessageListAtBottomRef.current = true
     topRangeLoadLockRef.current = false
     bottomRangeLoadLockRef.current = false
@@ -4363,6 +4581,9 @@ function ChatPage(props: ChatPageProps) {
     setShowJumpPopover(false)
     setShowDetailPanel(false)
     setShowGroupMembersPanel(false)
+    setShowGroupSummaryPanel(false)
+    setGroupSummaryError(null)
+    setGroupSummaryHint(null)
     setGroupMemberSearchKeyword('')
     setGroupMembersError(null)
     setGroupMembersLoadingHint('')
@@ -5471,6 +5692,20 @@ function ChatPage(props: ChatPageProps) {
   }, [showJumpPopover])
 
   useEffect(() => {
+    if (!showGroupSummaryDatePopover) return
+    const handleGlobalPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null
+      if (!target) return
+      if (groupSummaryDateWrapRef.current?.contains(target)) return
+      setShowGroupSummaryDatePopover(false)
+    }
+    document.addEventListener('mousedown', handleGlobalPointerDown)
+    return () => {
+      document.removeEventListener('mousedown', handleGlobalPointerDown)
+    }
+  }, [showGroupSummaryDatePopover])
+
+  useEffect(() => {
     if (!showJumpPopover) return
     const syncPosition = () => {
       requestAnimationFrame(() => updateJumpPopoverPosition())
@@ -5807,6 +6042,50 @@ function ChatPage(props: ChatPageProps) {
     })
   }, [currentSession, isCurrentSessionPrivateSnsSupported])
 
+  const showSessionInsightHint = useCallback((hint: { success: boolean; message: string }) => {
+    if (sessionInsightHintTimerRef.current !== null) {
+      window.clearTimeout(sessionInsightHintTimerRef.current)
+      sessionInsightHintTimerRef.current = null
+    }
+    setSessionInsightHint(hint)
+    sessionInsightHintTimerRef.current = window.setTimeout(() => {
+      setSessionInsightHint(null)
+      sessionInsightHintTimerRef.current = null
+    }, 5000)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (sessionInsightHintTimerRef.current !== null) {
+        window.clearTimeout(sessionInsightHintTimerRef.current)
+        sessionInsightHintTimerRef.current = null
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    let canceled = false
+
+    const loadGroupSummaryConfig = () => {
+      void configService.getAiGroupSummaryEnabled()
+        .then((enabled) => {
+          if (!canceled) setAiGroupSummaryEnabled(enabled)
+        })
+        .catch((error) => {
+          console.warn('加载群聊总结配置失败:', error)
+          if (!canceled) setAiGroupSummaryEnabled(false)
+        })
+    }
+
+    loadGroupSummaryConfig()
+    const handleFocus = () => loadGroupSummaryConfig()
+    window.addEventListener('focus', handleFocus)
+    return () => {
+      canceled = true
+      window.removeEventListener('focus', handleFocus)
+    }
+  }, [])
+
   useEffect(() => {
     if (!standaloneSessionWindow) return
     setStandaloneInitialLoadRequested(false)
@@ -5868,7 +6147,7 @@ function ChatPage(props: ChatPageProps) {
     selectSessionById
   ])
 
-  // 监听 URL 参数中的会话/锚点（通知跳转 + 足迹锚点定位）
+  // 监听 URL 参数中的会话/锚点（通知跳转 + 足迹/深度解析锚点定位）
   useEffect(() => {
     if (standaloneSessionWindow) return // standalone模式由上面的useEffect处理
     const params = new URLSearchParams(location.search)
@@ -5883,8 +6162,41 @@ function ChatPage(props: ChatPageProps) {
       && jumpLocalId > 0
       && Number.isFinite(jumpCreateTime)
       && jumpCreateTime > 0
+    const hasMessageAnalysisAnchor = jumpSource === 'messageAnalysis'
+      && Number.isFinite(jumpLocalId)
+      && jumpLocalId > 0
+      && Number.isFinite(jumpCreateTime)
+      && jumpCreateTime > 0
 
     if (hasFootprintAnchor) {
+      pendingFootprintJumpRef.current = {
+        sessionId: urlSessionId,
+        localId: jumpLocalId,
+        createTime: jumpCreateTime
+      }
+      if (currentSessionId !== urlSessionId) {
+        selectSessionById(urlSessionId)
+        return
+      }
+      const messageStub: Message = {
+        messageKey: `footprint:${urlSessionId}:${jumpCreateTime}:${jumpLocalId}`,
+        localId: jumpLocalId,
+        serverId: 0,
+        localType: 0,
+        createTime: jumpCreateTime,
+        sortSeq: jumpCreateTime,
+        isSend: null,
+        senderUsername: null,
+        parsedContent: '',
+        rawContent: ''
+      }
+      handleInSessionResultJump(messageStub)
+      pendingFootprintJumpRef.current = null
+      navigate('/chat', { replace: true })
+      return
+    }
+
+    if (hasMessageAnalysisAnchor) {
       pendingFootprintJumpRef.current = {
         sessionId: urlSessionId,
         localId: jumpLocalId,
@@ -6114,6 +6426,41 @@ function ChatPage(props: ChatPageProps) {
       requestId
     })
   }, [currentSession, currentSessionId, inProgressExportSessionIds, isPreparingExportDialog])
+
+  const handleTriggerSessionInsight = useCallback(async () => {
+    const session = currentSession
+    const sessionId = String(session?.username || currentSessionId || '').trim()
+    if (!sessionId || isTriggeringSessionInsight) return
+
+    setIsTriggeringSessionInsight(true)
+    if (sessionInsightHintTimerRef.current !== null) {
+      window.clearTimeout(sessionInsightHintTimerRef.current)
+      sessionInsightHintTimerRef.current = null
+    }
+    setSessionInsightHint({ success: true, message: '正在生成当前聊天的 AI 见解...' })
+    try {
+      const result = await window.electronAPI.insight.triggerSessionInsight({
+        sessionId,
+        displayName: session?.displayName || sessionId,
+        avatarUrl: session?.avatarUrl
+      })
+      if (currentSessionRef.current !== sessionId) return
+      showSessionInsightHint({
+        success: result.success,
+        message: result.message || (result.success ? 'AI 见解已生成' : 'AI 见解生成失败')
+      })
+    } catch (error) {
+      if (currentSessionRef.current !== sessionId) return
+      showSessionInsightHint({
+        success: false,
+        message: `触发失败：${(error as Error).message || String(error)}`
+      })
+    } finally {
+      if (currentSessionRef.current === sessionId) {
+        setIsTriggeringSessionInsight(false)
+      }
+    }
+  }, [currentSession, currentSessionId, isTriggeringSessionInsight, showSessionInsightHint])
 
   const handleGroupAnalytics = useCallback(() => {
     if (!currentSessionId || !isGroupChatSession(currentSessionId)) return
@@ -6887,6 +7234,8 @@ function ChatPage(props: ChatPageProps) {
           messageKey={messageKey}
           isSelected={selectedMessages.has(messageKey)}
           onToggleSelection={handleToggleSelection}
+          aiMessageInsightEnabled={aiMessageInsightEnabled}
+          aiMessageInsightContextCount={aiMessageInsightContextCount}
         />
       </div>
     )
@@ -6906,7 +7255,9 @@ function ChatPage(props: ChatPageProps) {
     handleJumpToQuotedMessage,
     isSelectionMode,
     selectedMessages,
-    handleToggleSelection
+    handleToggleSelection,
+    aiMessageInsightEnabled,
+    aiMessageInsightContextCount
   ])
 
   return (
@@ -7240,9 +7591,11 @@ function ChatPage(props: ChatPageProps) {
                 isGroupChat={isCurrentSessionGroup}
                 standaloneSessionWindow={standaloneSessionWindow}
                 showGroupMembersPanel={showGroupMembersPanel}
+                showGroupSummaryPanel={showGroupSummaryPanel}
                 showJumpPopover={showJumpPopover}
                 showInSessionSearch={showInSessionSearch}
                 showDetailPanel={showDetailPanel}
+                aiGroupSummaryEnabled={aiGroupSummaryEnabled}
                 shouldHideStandaloneDetailButton={shouldHideStandaloneDetailButton}
                 isPrivateSnsSupported={isCurrentSessionPrivateSnsSupported}
                 isExportActionBusy={isExportActionBusy}
@@ -7251,10 +7604,13 @@ function ChatPage(props: ChatPageProps) {
                 isBatchTranscribing={isBatchTranscribing}
                 runningBatchVoiceTaskType={runningBatchVoiceTaskType}
                 isBatchDecrypting={isBatchDecrypting}
+                isTriggeringSessionInsight={isTriggeringSessionInsight}
                 isRefreshingMessages={isRefreshingMessages}
                 isLoadingMessages={isLoadingMessages}
                 currentSessionId={currentSessionId}
                 jumpCalendarWrapRef={jumpCalendarWrapRef}
+                onTriggerSessionInsight={handleTriggerSessionInsight}
+                onToggleGroupSummaryPanel={toggleGroupSummaryPanel}
                 onGroupAnalytics={handleGroupAnalytics}
                 onToggleGroupMembersPanel={toggleGroupMembersPanel}
                 onExportCurrentSession={handleExportCurrentSession}
@@ -7296,6 +7652,20 @@ function ChatPage(props: ChatPageProps) {
               <div className="export-prepare-hint" role="status" aria-live="polite">
                 <Loader2 size={14} className="spin" />
                 <span>{exportPrepareHint}</span>
+              </div>
+            )}
+
+            {sessionInsightHint && (
+              <div className={`session-insight-hint ${sessionInsightHint.success ? 'success' : 'error'}`} role="status" aria-live="polite">
+                {isTriggeringSessionInsight ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />}
+                <span>{sessionInsightHint.message}</span>
+              </div>
+            )}
+
+            {groupSummaryHint && (
+              <div className={`session-insight-hint ${groupSummaryHint.success ? 'success' : 'error'}`} role="status" aria-live="polite">
+                {isTriggeringGroupSummary ? <Loader2 size={14} className="spin" /> : <Newspaper size={14} />}
+                <span>{groupSummaryHint.message}</span>
               </div>
             )}
 
@@ -7536,6 +7906,138 @@ function ChatPage(props: ChatPageProps) {
                       ))}
                     </div>
                   )}
+                </div>
+              )}
+
+              {showGroupSummaryPanel && isCurrentSessionGroup && (
+                <div className="detail-panel group-summary-panel">
+                  <div className="detail-header">
+                    <div className="detail-title-wrap">
+                      <h4>AI 群聊总结</h4>
+                      <span className="detail-title-sub">{currentSession?.displayName || currentSessionId}</span>
+                    </div>
+                    <button className="close-btn" onClick={() => setShowGroupSummaryPanel(false)}>
+                      <X size={16} />
+                    </button>
+                  </div>
+
+                  <div className="group-summary-controls">
+                    <div className="group-summary-date-row">
+                      <label>日期</label>
+                      <div className="group-summary-date-picker" ref={groupSummaryDateWrapRef}>
+                        <button
+                          type="button"
+                          className={`group-summary-date-trigger ${showGroupSummaryDatePopover ? 'open' : ''}`}
+                          onClick={() => setShowGroupSummaryDatePopover((open) => !open)}
+                        >
+                          <span>{groupSummaryDateFilter}</span>
+                          <Calendar size={14} />
+                        </button>
+                        <JumpToDatePopover
+                          isOpen={showGroupSummaryDatePopover}
+                          onClose={() => setShowGroupSummaryDatePopover(false)}
+                          currentDate={new Date(`${groupSummaryDateFilter || formatDateInputLocal(new Date())}T00:00:00`)}
+                          onSelect={(date) => setGroupSummaryDateFilter(formatDateInputLocal(date))}
+                          className="group-summary-calendar-popover"
+                          maxDate={new Date()}
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        className="group-summary-icon-btn"
+                        onClick={() => void loadGroupSummaryRecords(currentSessionId || undefined)}
+                        title="刷新总结"
+                      >
+                        <RefreshCw size={14} className={groupSummaryLoading ? 'spin' : ''} />
+                      </button>
+                    </div>
+
+                    {isGroupSummaryToday ? (
+                      <div className="group-summary-range-tabs">
+                        {([1, 2, 4, 8, 12, 24] as const).map((hours) => (
+                          <button
+                            key={hours}
+                            type="button"
+                            className={groupSummaryRangeMode === hours ? 'active' : ''}
+                            onClick={() => setGroupSummaryRangeMode(hours)}
+                          >
+                            {hours}h
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="group-summary-rule-hint">将按设置里的自动总结间隔切分选中日期的完整聊天记录。</div>
+                    )}
+
+                    <button
+                      type="button"
+                      className="group-summary-generate-btn"
+                      onClick={() => void triggerManualGroupSummary()}
+                      disabled={isTriggeringGroupSummary}
+                    >
+                      {isTriggeringGroupSummary ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />}
+                      <span>生成总结</span>
+                    </button>
+                    <div className="group-summary-rule-hint">
+                      {isGroupSummaryToday ? '少于 5 条可总结消息会自动跳过。' : '每个切片少于 5 条可总结消息会自动跳过。'}
+                    </div>
+                  </div>
+
+                  <div className="group-summary-list">
+                    {groupSummaryLoading ? (
+                      <div className="detail-loading">
+                        <Loader2 size={20} className="spin" />
+                        <span>加载总结中...</span>
+                      </div>
+                    ) : groupSummaryError ? (
+                      <div className="detail-empty">{groupSummaryError}</div>
+                    ) : groupSummaryRecords.length === 0 ? (
+                      <div className="detail-empty">当前日期暂无群聊总结</div>
+                    ) : (
+                      <>
+                        <div className="group-summary-count">共 {groupSummaryTotal} 条总结</div>
+                        {groupSummaryRecords.map((record) => (
+                          <div key={record.id} className="group-summary-record">
+                            <div className="group-summary-record-head">
+                              <div>
+                                <span className="group-summary-period">{formatSummaryPeriod(record.periodStart, record.periodEnd)}</span>
+                                <span className="group-summary-meta">
+                                  {record.triggerType === 'manual' ? '手动' : '自动'} · {record.readableMessageCount} 条消息
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                className="group-summary-code-btn"
+                                onClick={() => void openGroupSummaryLog(record.id)}
+                                title="查看完整日志"
+                              >
+                                <Code2 size={14} />
+                              </button>
+                            </div>
+                            <div className="group-summary-topic-list">
+                              {record.topics.map((topic, topicIndex) => (
+                                <div key={`${record.id}-${topicIndex}`} className="group-summary-topic">
+                                  <h5>{topic.title}</h5>
+                                  <div className="group-summary-topic-row">
+                                    <span>参与者</span>
+                                    <p>{topic.participants.length > 0 ? topic.participants.join('、') : '未明确'}</p>
+                                  </div>
+                                  <div className="group-summary-topic-row">
+                                    <span>关键/矛盾点</span>
+                                    <p>{topic.keyPoints.length > 0 ? topic.keyPoints.join('；') : '无'}</p>
+                                  </div>
+                                  <div className="group-summary-topic-row">
+                                    <span>结论</span>
+                                    <p>{topic.conclusion || '暂无明确结论'}</p>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -8195,6 +8697,79 @@ function ChatPage(props: ChatPageProps) {
         document.body
       )}
 
+      {groupSummaryLogRecord && createPortal(
+        <div className="message-info-overlay" onClick={() => setGroupSummaryLogRecord(null)}>
+          <div className="message-info-modal group-summary-log-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="detail-header">
+              <h4>群聊总结日志</h4>
+              <button className="close-btn" onClick={() => setGroupSummaryLogRecord(null)}>
+                <X size={16} />
+              </button>
+            </div>
+            <div className="detail-content">
+              <div className="detail-section">
+                <div className="detail-item">
+                  <span className="label">群聊</span>
+                  <span className="value">{groupSummaryLogRecord.displayName}</span>
+                </div>
+                <div className="detail-item">
+                  <span className="label">时段</span>
+                  <span className="value">{formatSummaryPeriod(groupSummaryLogRecord.periodStart, groupSummaryLogRecord.periodEnd)}</span>
+                </div>
+                <div className="detail-item">
+                  <span className="label">触发</span>
+                  <span className="value">{groupSummaryLogRecord.triggerType === 'manual' ? '手动' : '自动'}</span>
+                </div>
+                <div className="detail-item">
+                  <span className="label">模型</span>
+                  <span className="value">{groupSummaryLogRecord.log.model}</span>
+                </div>
+                <div className="detail-item">
+                  <span className="label">消息数</span>
+                  <span className="value">{groupSummaryLogRecord.log.readableMessageCount} / {groupSummaryLogRecord.log.messageCount}</span>
+                </div>
+                <div className="detail-item">
+                  <span className="label">JSON Mode</span>
+                  <span className="value">
+                    {groupSummaryLogRecord.log.responseFormatJson ? '启用' : '未启用'}
+                    {groupSummaryLogRecord.log.responseFormatFallback ? `，已降级：${groupSummaryLogRecord.log.responseFormatFallbackReason || '未知原因'}` : ''}
+                  </span>
+                </div>
+              </div>
+              <div className="detail-section">
+                <div className="section-title">
+                  <Code2 size={14} />
+                  <span>系统提示词</span>
+                </div>
+                <pre className="group-summary-log-pre">{groupSummaryLogRecord.log.systemPrompt}</pre>
+              </div>
+              <div className="detail-section">
+                <div className="section-title">
+                  <Code2 size={14} />
+                  <span>用户提示词与完整记录</span>
+                </div>
+                <pre className="group-summary-log-pre">{groupSummaryLogRecord.log.userPrompt}</pre>
+              </div>
+              <div className="detail-section">
+                <div className="section-title">
+                  <Code2 size={14} />
+                  <span>模型输出原文</span>
+                </div>
+                <pre className="group-summary-log-pre">{groupSummaryLogRecord.log.rawOutput}</pre>
+              </div>
+              <div className="detail-section">
+                <div className="section-title">
+                  <Newspaper size={14} />
+                  <span>最终总结</span>
+                </div>
+                <pre className="group-summary-log-pre">{groupSummaryLogRecord.log.finalSummary}</pre>
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
       {/* 修改消息弹窗 */}
       {editingMessage && createPortal(
         <div className="modal-overlay">
@@ -8401,6 +8976,32 @@ const senderAvatarCache = createBoundedCache<{ avatarUrl?: string; displayName?:
 })
 const senderAvatarLoading = new Map<string, Promise<{ avatarUrl?: string; displayName?: string } | null>>()
 
+type MessageInsightAnalysis = {
+  explicitText: string
+  emotion: string
+  intent: string
+  topic: string
+}
+
+type MessageInsightState = {
+  status: 'idle' | 'loading' | 'success' | 'error'
+  data?: MessageInsightAnalysis
+  error?: string
+  cached?: boolean
+  recordId?: string
+}
+
+const messageInsightMemoryCache = new Map<string, MessageInsightState>()
+
+function buildMessageInsightCacheKey(sessionId: string, message: Message, messageKey: string): string {
+  return [
+    String(sessionId || '').trim(),
+    Math.floor(Number(message.localId || 0)),
+    Math.floor(Number(message.createTime || 0)),
+    messageKey
+  ].join(':')
+}
+
 function getSharedImageDecryptTask(
   key: string,
   createTask: () => Promise<SharedImageDecryptResult>
@@ -8456,6 +9057,190 @@ function QuotedEmoji({ cdnUrl, md5 }: { cdnUrl: string; md5?: string }) {
 }
 
 // 消息气泡组件
+function MessageInsightControl({
+  message,
+  messageKey,
+  session,
+  displayName,
+  avatarUrl,
+  senderName,
+  targetText,
+  contextCount,
+  compact
+}: {
+  message: Message
+  messageKey: string
+  session: ChatSession
+  displayName?: string
+  avatarUrl?: string
+  senderName?: string
+  targetText: string
+  contextCount: number
+  compact?: boolean
+}) {
+  const anchorRef = useRef<HTMLButtonElement | null>(null)
+  const cardRef = useRef<HTMLDivElement | null>(null)
+  const cacheKey = useMemo(() => buildMessageInsightCacheKey(session.username, message, messageKey), [message, messageKey, session.username])
+  const [open, setOpen] = useState(false)
+  const [state, setState] = useState<MessageInsightState>(() => messageInsightMemoryCache.get(cacheKey) || { status: 'idle' })
+  const [position, setPosition] = useState<{ top: number; left: number; placement: 'top' | 'bottom' }>({ top: 0, left: 0, placement: 'top' })
+
+  useEffect(() => {
+    setState(messageInsightMemoryCache.get(cacheKey) || { status: 'idle' })
+    setOpen(false)
+  }, [cacheKey])
+
+  const updatePosition = useCallback(() => {
+    const anchor = anchorRef.current
+    if (!anchor) return
+    const rect = anchor.getBoundingClientRect()
+    const cardWidth = cardRef.current?.offsetWidth || 320
+    const cardHeight = cardRef.current?.offsetHeight || 190
+    const gap = 10
+    const preferredTop = rect.top - cardHeight - gap
+    const placement: 'top' | 'bottom' = preferredTop < 8 ? 'bottom' : 'top'
+    const top = placement === 'top' ? preferredTop : rect.bottom + gap
+    const left = Math.min(Math.max(8, rect.left + 20), Math.max(8, window.innerWidth - cardWidth - 8))
+    setPosition({
+      top: Math.min(Math.max(8, top), Math.max(8, window.innerHeight - cardHeight - 8)),
+      left,
+      placement
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!open) return
+    updatePosition()
+    const handle = () => updatePosition()
+    window.addEventListener('resize', handle)
+    window.addEventListener('scroll', handle, true)
+    return () => {
+      window.removeEventListener('resize', handle)
+      window.removeEventListener('scroll', handle, true)
+    }
+  }, [open, updatePosition])
+
+  const requestInsight = useCallback(async (forceRefresh = false) => {
+    if (!forceRefresh) {
+      const cached = messageInsightMemoryCache.get(cacheKey)
+      if (cached?.status === 'success') {
+        setState(cached)
+        return
+      }
+    }
+    setState({ status: 'loading' })
+    try {
+      const result = await window.electronAPI.insight.generateMessageInsight({
+        sessionId: session.username,
+        displayName: displayName || session.displayName || session.username,
+        avatarUrl: avatarUrl || session.avatarUrl,
+        targetLocalId: message.localId,
+        targetCreateTime: message.createTime,
+        targetMessageKey: messageKey,
+        targetText,
+        targetSenderName: senderName || displayName || session.displayName || session.username,
+        contextCount,
+        forceRefresh
+      })
+      if (result.success && result.data) {
+        const nextState: MessageInsightState = {
+          status: 'success',
+          data: result.data,
+          cached: result.cached === true,
+          recordId: result.recordId
+        }
+        messageInsightMemoryCache.set(cacheKey, nextState)
+        setState(nextState)
+      } else {
+        setState({ status: 'error', error: result.message || '解析失败' })
+      }
+    } catch (error) {
+      setState({ status: 'error', error: (error as Error).message || '解析失败' })
+    }
+  }, [avatarUrl, cacheKey, contextCount, displayName, message.createTime, message.localId, messageKey, senderName, session.avatarUrl, session.displayName, session.username, targetText])
+
+  const handleOpen = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation()
+    setOpen(true)
+    window.setTimeout(updatePosition, 0)
+    const cached = messageInsightMemoryCache.get(cacheKey)
+    if (cached?.status === 'success') {
+      setState(cached)
+      return
+    }
+    void requestInsight(false)
+  }, [cacheKey, requestInsight, updatePosition])
+
+  const card = open ? createPortal(
+    <>
+      <button className="message-insight-backdrop" type="button" aria-label="关闭深度解析" onClick={() => setOpen(false)} />
+      <div
+        ref={cardRef}
+        className={`message-insight-card open placement-${position.placement}`}
+        style={{ top: position.top, left: position.left }}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="message-insight-card-header">
+          <Star size={14} />
+          <span>深度解析</span>
+          <button
+            type="button"
+            className="message-insight-refresh"
+            title="重新解析"
+            onClick={() => void requestInsight(true)}
+            disabled={state.status === 'loading'}
+          >
+            {state.status === 'loading' ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />}
+          </button>
+        </div>
+        <div className="message-insight-card-body">
+          {state.status === 'loading' && (
+            <div className="message-insight-loading">
+              <Loader2 size={15} className="spin" />
+              <span>解析中...</span>
+            </div>
+          )}
+          {state.status === 'error' && (
+            <div className="message-insight-error">
+              <span>{state.error || '解析失败'}</span>
+              <button type="button" onClick={() => void requestInsight(true)}>重试</button>
+            </div>
+          )}
+          {state.status === 'success' && state.data && (
+            <>
+              <p className="message-insight-text">{state.data.explicitText}</p>
+              <div className="message-insight-divider" />
+              <div className="message-insight-tags">
+                <span className="message-insight-tag mood">情绪：{state.data.emotion}</span>
+                <span className="message-insight-tag intent">意图：{state.data.intent}</span>
+                <span className="message-insight-tag">话题：{state.data.topic}</span>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </>,
+    document.body
+  ) : null
+
+  return (
+    <>
+      <button
+        ref={anchorRef}
+        type="button"
+        className={`message-insight-trigger ${compact ? 'compact' : ''}`}
+        onClick={handleOpen}
+        title="深度解析"
+        aria-label="深度解析"
+      >
+        <Star size={12} />
+        {!compact && <span>深度解析</span>}
+      </button>
+      {card}
+    </>
+  )
+}
+
 function MessageBubble({
   message,
   messageKey,
@@ -8471,7 +9256,9 @@ function MessageBubble({
   onJumpToQuotedMessage,
   isSelectionMode,
   isSelected,
-  onToggleSelection
+  onToggleSelection,
+  aiMessageInsightEnabled,
+  aiMessageInsightContextCount
 }: {
   message: Message;
   messageKey: string;
@@ -8488,6 +9275,8 @@ function MessageBubble({
   isSelectionMode?: boolean;
   isSelected?: boolean;
   onToggleSelection?: (messageKey: string, isShiftKey?: boolean) => void;
+  aiMessageInsightEnabled?: boolean;
+  aiMessageInsightContextCount?: number;
 }) {
   const isSystem = isSystemMessage(message.localType)
   const isEmoji = message.localType === 47
@@ -9706,6 +10495,33 @@ function MessageBubble({
   const avatarUrl = isSent
     ? (myAvatarUrl || resolvedSenderAvatarUrl)
     : (isGroupChat ? resolvedSenderAvatarUrl : session.avatarUrl)
+  const canShowMessageInsight = Boolean(
+    aiMessageInsightEnabled &&
+    !isSent &&
+    !isSystem &&
+    !isImage &&
+    !isVideo &&
+    !isVoice &&
+    !isEmoji &&
+    !isCard &&
+    !isCall &&
+    !isType49 &&
+    message.localType === 1 &&
+    cleanedParsedContent.trim()
+  )
+  const messageInsightControl = canShowMessageInsight ? (
+    <MessageInsightControl
+      message={message}
+      messageKey={messageKey}
+      session={session}
+      displayName={session.displayName || session.username}
+      avatarUrl={avatarUrl}
+      senderName={resolvedSenderName || session.displayName || session.username}
+      targetText={cleanedParsedContent}
+      contextCount={aiMessageInsightContextCount || 50}
+      compact={!isGroupChat}
+    />
+  ) : null
 
   // 是否有引用消息
   const hasQuote = quotedContent.length > 0
@@ -11051,6 +11867,7 @@ function MessageBubble({
       isSelected={isSelected}
       onContextMenu={onContextMenu}
       onToggleSelection={onToggleSelection}
+      actionNode={messageInsightControl}
       portal={systemAlertPortal}
     >
       {renderContent()}
@@ -11073,6 +11890,8 @@ const MemoMessageBubble = React.memo(MessageBubble, (prevProps, nextProps) => {
   if (prevProps.onContextMenu !== nextProps.onContextMenu) return false
   if (prevProps.onJumpToQuotedMessage !== nextProps.onJumpToQuotedMessage) return false
   if (prevProps.onToggleSelection !== nextProps.onToggleSelection) return false
+  if (prevProps.aiMessageInsightEnabled !== nextProps.aiMessageInsightEnabled) return false
+  if (prevProps.aiMessageInsightContextCount !== nextProps.aiMessageInsightContextCount) return false
 
   return (
     prevProps.session.username === nextProps.session.username &&

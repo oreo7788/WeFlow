@@ -16,6 +16,7 @@ interface ExportWorkerConfig {
   resourcesPath?: string
   userDataPath?: string
   logEnabled?: boolean
+  isPackaged?: boolean
 }
 
 const config = workerData as ExportWorkerConfig
@@ -150,7 +151,10 @@ async function run() {
     decryptKey: config.decryptKey,
     myWxid: config.myWxid,
     imageXorKey: config.imageXorKey,
-    imageAesKey: config.imageAesKey
+    imageAesKey: config.imageAesKey,
+    resourcesPath: config.resourcesPath,
+    appPath: config.resourcesPath ? require('path').dirname(config.resourcesPath) : __dirname,
+    isPackaged: config.isPackaged
   })
 
   const onProgress = (progress: any) => queueProgress(progress)
@@ -173,7 +177,10 @@ async function run() {
     chatService.setRuntimeConfig({
       dbPath: config.dbPath,
       decryptKey: config.decryptKey,
-      myWxid: config.myWxid
+      myWxid: config.myWxid,
+      resourcesPath: config.resourcesPath,
+      appPath: config.resourcesPath ? require('path').dirname(config.resourcesPath) : __dirname,
+      isPackaged: config.isPackaged
     })
     result = await contactExportService.exportContacts(
       String(config.outputDir || ''),

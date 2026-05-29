@@ -27,6 +27,16 @@ export interface TimeDistribution {
   monthlyDistribution: Record<string, number>
 }
 
+export interface SelfSentDailyDistribution {
+  unit: 'day'
+  dailyDistribution: Record<string, number>
+  totalMessages: number
+  firstMessageTime: number | null
+  lastMessageTime: number | null
+  beginTimestamp: number
+  endTimestamp: number
+}
+
 export interface ContactRanking {
   username: string
   displayName: string
@@ -42,6 +52,7 @@ class AnalyticsService {
   private configService: ConfigService
   private fallbackAggregateCache: { key: string; data: any; updatedAt: number } | null = null
   private aggregateCache: { key: string; data: any; updatedAt: number } | null = null
+  private selfSentDailyCache: { key: string; data: SelfSentDailyDistribution; updatedAt: number } | null = null
   private aggregatePromise: { key: string; promise: Promise<{ success: boolean; data?: any; source?: string; error?: string }> } | null = null
 
   constructor() {
@@ -190,15 +201,12 @@ class AnalyticsService {
     sessionId: string,
     onRow: (row: Record<string, any>) => void,
     beginTimestamp = 0,
-    endTimestamp = 0
+    endTimestamp = 0,
+    lite = false
   ): Promise<void> {
-    const cursorResult = await wcdbService.openMessageCursor(
-      sessionId,
-      500,
-      true,
-      beginTimestamp,
-      endTimestamp
-    )
+    const cursorResult = lite
+      ? await wcdbService.openMessageCursorLite(sessionId, 500, true, beginTimestamp, endTimestamp)
+      : await wcdbService.openMessageCursor(sessionId, 500, true, beginTimestamp, endTimestamp)
     if (!cursorResult.success || !cursorResult.cursor) return
 
     try {
@@ -221,6 +229,76 @@ class AnalyticsService {
     } finally {
       await wcdbService.closeMessageCursor(cursorResult.cursor)
     }
+  }
+
+  private getRowCreateTime(row: Record<string, any>): number {
+    const raw = row.create_time ?? row.createTime ?? row.create_time_ms ?? '0'
+    const parsed = parseInt(String(raw), 10)
+    if (!Number.isFinite(parsed) || parsed <= 0) return 0
+    return parsed > 1e12 ? Math.floor(parsed / 1000) : parsed
+  }
+
+  private isRowSentByMe(row: Record<string, any>, cleanedWxid: string): boolean {
+    const isSendRaw = row.computed_is_send ?? row.is_send ?? row.isSend
+    const normalized = String(isSendRaw).trim().toLowerCase()
+    let isSend = isSendRaw === 1 || isSendRaw === true || normalized === '1' || normalized === 'true'
+
+    if (isSendRaw === undefined || isSendRaw === null) {
+      const senderUsername = row.sender_username || row.senderUsername || row.sender
+      if (senderUsername && cleanedWxid) {
+        const senderLower = String(senderUsername).toLowerCase()
+        const myWxidLower = cleanedWxid.toLowerCase()
+        isSend = senderLower === myWxidLower || senderLower.startsWith(`${myWxidLower}_`)
+      }
+    }
+
+    return isSend
+  }
+
+  private formatDayKey(timestamp: number): string {
+    const date = new Date(timestamp * 1000)
+    const year = date.getFullYear()
+    const month = String(date.getMonth() + 1).padStart(2, '0')
+    const day = String(date.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
+  }
+
+  private sortDailyDistribution(daily: Record<string, number>): Record<string, number> {
+    const sorted: Record<string, number> = {}
+    for (const key of Object.keys(daily).sort()) {
+      sorted[key] = daily[key]
+    }
+    return sorted
+  }
+
+  private completeDailyDistribution(
+    daily: Record<string, number>,
+    firstTimestamp: number,
+    lastTimestamp: number
+  ): Record<string, number> {
+    if (!firstTimestamp || !lastTimestamp || lastTimestamp < firstTimestamp) {
+      return this.sortDailyDistribution(daily)
+    }
+
+    const start = new Date(firstTimestamp * 1000)
+    const end = new Date(lastTimestamp * 1000)
+    start.setHours(0, 0, 0, 0)
+    end.setHours(0, 0, 0, 0)
+
+    const roughDays = Math.floor((end.getTime() - start.getTime()) / 86400000) + 1
+    if (roughDays <= 0 || roughDays > 5000) {
+      return this.sortDailyDistribution(daily)
+    }
+
+    const completed: Record<string, number> = {}
+    const cursor = new Date(start)
+    while (cursor.getTime() <= end.getTime()) {
+      const key = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}-${String(cursor.getDate()).padStart(2, '0')}`
+      completed[key] = daily[key] || 0
+      cursor.setDate(cursor.getDate() + 1)
+    }
+
+    return completed
   }
 
   private setProgress(window: any, status: string, progress: number) {
@@ -251,6 +329,7 @@ class AnalyticsService {
       hourly: {} as Record<number, number>,
       weekday: {} as Record<number, number>,
       daily: {} as Record<string, number>,
+      sentDaily: {} as Record<string, number>,
       monthly: {} as Record<string, number>,
       sessions: {} as Record<string, { total: number; sent: number; received: number; lastTime: number }>,
       idMap: {}
@@ -259,27 +338,13 @@ class AnalyticsService {
     for (const sessionId of sessionIds) {
       const sessionStat = { total: 0, sent: 0, received: 0, lastTime: 0 }
       await this.iterateSessionMessages(sessionId, (row) => {
-        const createTime = parseInt(row.create_time || row.createTime || row.create_time_ms || '0', 10)
+        const createTime = this.getRowCreateTime(row)
         if (!createTime) return
         if (beginTimestamp > 0 && createTime < beginTimestamp) return
         if (endTimestamp > 0 && createTime > endTimestamp) return
 
         const localType = parseInt(row.local_type || row.type || '1', 10)
-        const isSendRaw = row.computed_is_send ?? row.is_send ?? row.isSend
-        let isSend = String(isSendRaw) === '1' || isSendRaw === 1 || isSendRaw === true
-
-        // 如果底层没有提供 is_send，则根据发送者用户名推断
-        const senderUsername = row.sender_username || row.senderUsername || row.sender
-        if (isSendRaw === undefined || isSendRaw === null) {
-          if (senderUsername && (cleanedWxid)) {
-            const senderLower = String(senderUsername).toLowerCase()
-            const myWxidLower = cleanedWxid.toLowerCase()
-            isSend = (
-              senderLower === myWxidLower ||
-              senderLower.startsWith(myWxidLower + '_')
-            )
-          }
-        }
+        const isSend = this.isRowSentByMe(row, cleanedWxid)
 
         aggregate.total += 1
         sessionStat.total += 1
@@ -314,6 +379,9 @@ class AnalyticsService {
         aggregate.weekday[weekday] = (aggregate.weekday[weekday] || 0) + 1
         aggregate.monthly[monthKey] = (aggregate.monthly[monthKey] || 0) + 1
         aggregate.daily[dayKey] = (aggregate.daily[dayKey] || 0) + 1
+        if (isSend) {
+          aggregate.sentDaily[dayKey] = (aggregate.sentDaily[dayKey] || 0) + 1
+        }
       }, beginTimestamp, endTimestamp)
 
       if (sessionStat.total > 0) {
@@ -322,6 +390,49 @@ class AnalyticsService {
     }
 
     return aggregate
+  }
+
+  private async computeSelfSentDailyDistribution(
+    sessionIds: string[],
+    cleanedWxid: string,
+    beginTimestamp = 0,
+    endTimestamp = 0
+  ): Promise<SelfSentDailyDistribution> {
+    const dailyDistribution: Record<string, number> = {}
+    let totalMessages = 0
+    let firstMessageTime = 0
+    let lastMessageTime = 0
+
+    for (const sessionId of sessionIds) {
+      await this.iterateSessionMessages(sessionId, (row) => {
+        const createTime = this.getRowCreateTime(row)
+        if (!createTime) return
+        if (beginTimestamp > 0 && createTime < beginTimestamp) return
+        if (endTimestamp > 0 && createTime > endTimestamp) return
+        if (!this.isRowSentByMe(row, cleanedWxid)) return
+
+        const dayKey = this.formatDayKey(createTime)
+        dailyDistribution[dayKey] = (dailyDistribution[dayKey] || 0) + 1
+        totalMessages += 1
+
+        if (firstMessageTime === 0 || createTime < firstMessageTime) {
+          firstMessageTime = createTime
+        }
+        if (createTime > lastMessageTime) {
+          lastMessageTime = createTime
+        }
+      }, beginTimestamp, endTimestamp, true)
+    }
+
+    return {
+      unit: 'day',
+      dailyDistribution: this.completeDailyDistribution(dailyDistribution, firstMessageTime, lastMessageTime),
+      totalMessages,
+      firstMessageTime: firstMessageTime || null,
+      lastMessageTime: lastMessageTime || null,
+      beginTimestamp,
+      endTimestamp
+    }
   }
 
   private async getAggregateWithFallback(
@@ -668,9 +779,47 @@ class AnalyticsService {
     }
   }
 
+  async getSelfSentDailyDistribution(
+    beginTimestamp: number = 0,
+    endTimestamp: number = 0,
+    force = false
+  ): Promise<{ success: boolean; data?: SelfSentDailyDistribution; error?: string }> {
+    try {
+      const conn = await this.ensureConnected()
+      if (!conn.success || !conn.cleanedWxid) return { success: false, error: conn.error }
+
+      const sessionInfo = await this.getPrivateSessions(conn.cleanedWxid)
+      if (sessionInfo.usernames.length === 0) {
+        return { success: false, error: '未找到消息会话' }
+      }
+
+      const cacheKey = `self-sent-daily-${this.buildAggregateCacheKey(sessionInfo.usernames, beginTimestamp, endTimestamp)}`
+      if (force) this.selfSentDailyCache = null
+
+      if (!force && this.selfSentDailyCache && this.selfSentDailyCache.key === cacheKey) {
+        if (Date.now() - this.selfSentDailyCache.updatedAt < 5 * 60 * 1000) {
+          return { success: true, data: this.selfSentDailyCache.data }
+        }
+      }
+
+      const data = await this.computeSelfSentDailyDistribution(
+        sessionInfo.usernames,
+        conn.cleanedWxid,
+        beginTimestamp,
+        endTimestamp
+      )
+      this.selfSentDailyCache = { key: cacheKey, data, updatedAt: Date.now() }
+
+      return { success: true, data }
+    } catch (e) {
+      return { success: false, error: String(e) }
+    }
+  }
+
   async clearCache(): Promise<{ success: boolean; error?: string }> {
     this.aggregateCache = null
     this.fallbackAggregateCache = null
+    this.selfSentDailyCache = null
     this.aggregatePromise = null
     try {
       await rm(this.getCacheFilePath(), { force: true })

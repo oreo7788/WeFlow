@@ -32,6 +32,8 @@ import { httpService } from './services/httpService'
 import { messagePushService } from './services/messagePushService'
 import { insightService } from './services/insightService'
 import { insightRecordService } from './services/insightRecordService'
+import { insightProfileService } from './services/insightProfileService'
+import { groupSummaryService } from './services/groupSummaryService'
 import { normalizeWeiboCookieInput, weiboService } from './services/social/weiboService'
 import { bizService } from './services/bizService'
 import { backupService } from './services/backupService'
@@ -397,13 +399,7 @@ let keyService: any
 if (process.platform === 'darwin') {
   keyService = new KeyServiceMac()
 } else if (process.platform === 'linux') {
-  // const { KeyServiceLinux } = require('./services/keyServiceLinux')
-  // keyService = new KeyServiceLinux()
-
-  import('./services/keyServiceLinux').then(({ KeyServiceLinux }) => {
-    keyService = new KeyServiceLinux();
-  });
-
+  keyService = new KeyServiceLinux()
 } else {
   keyService = new KeyService()
 }
@@ -444,6 +440,7 @@ const pruneChatHistoryPayloadStore = (): void => {
 }
 
 type WindowCloseBehavior = 'ask' | 'tray' | 'quit'
+type CloseRestoreMethod = 'tray' | 'dock'
 
 // 更新下载状态管理（Issue #294 修复）
 let isDownloadInProgress = false
@@ -817,29 +814,47 @@ const isSilentStartupEnabled = (): boolean => {
   return configService?.get('silentStartup') === true
 }
 
+const getCloseRestoreMethod = (): CloseRestoreMethod | null => {
+  if (tray) return 'tray'
+  if (process.platform === 'darwin') return 'dock'
+  return null
+}
+
+const canKeepMainWindowInBackground = (): boolean => {
+  return getCloseRestoreMethod() !== null
+}
+
+const getPlatformIconName = (): string => {
+  if (process.platform === 'linux') return 'icon.png'
+  if (process.platform === 'darwin') return 'icon.icns'
+  return 'icon.ico'
+}
+
+const resolveAppIconPath = (): string => {
+  const iconName = getPlatformIconName()
+  if (!process.env.VITE_DEV_SERVER_URL) {
+    return join(process.resourcesPath, iconName)
+  }
+  if (process.platform === 'darwin') {
+    return join(__dirname, '../resources/icons/macos/icon.icns')
+  }
+  return join(__dirname, `../public/${iconName}`)
+}
+
 const requestMainWindowCloseConfirmation = (win: BrowserWindow): void => {
   if (isClosePromptVisible) return
   isClosePromptVisible = true
+  const restoreMethod = getCloseRestoreMethod()
   win.webContents.send('window:confirmCloseRequested', {
-    canMinimizeToTray: Boolean(tray)
+    canMinimizeToTray: restoreMethod !== null,
+    restoreMethod: restoreMethod ?? undefined
   })
 }
 
 function createWindow(options: { autoShow?: boolean } = {}) {
   // 获取图标路径 - 打包后在 resources 目录
   const { autoShow = true } = options
-  let iconName = 'icon.ico';
-  if (process.platform === 'linux') {
-    iconName = 'icon.png';
-  } else if (process.platform === 'darwin') {
-    iconName = 'icon.icns';
-  }
-
-  const isDev = !!process.env.VITE_DEV_SERVER_URL
-
-  const iconPath = isDev
-      ? join(__dirname, `../public/${iconName}`)
-      : join(process.resourcesPath, iconName);
+  const iconPath = resolveAppIconPath()
 
   const win = new BrowserWindow({
     width: 1400,
@@ -912,7 +927,7 @@ function createWindow(options: { autoShow?: boolean } = {}) {
       return
     }
 
-    if (closeBehavior === 'tray' && tray) {
+    if (closeBehavior === 'tray' && canKeepMainWindowInBackground()) {
       win.hide()
       return
     }
@@ -1775,6 +1790,7 @@ function registerIpcHandlers() {
     }
     void messagePushService.handleConfigChanged(key)
     void insightService.handleConfigChanged(key)
+    void groupSummaryService.handleConfigChanged(key)
     return result
   })
 
@@ -1792,6 +1808,7 @@ function registerIpcHandlers() {
     sessionId?: string
     startTime?: number
     endTime?: number
+    sourceType?: 'insight' | 'message_analysis' | 'all'
     limit?: number
     offset?: number
   }) => {
@@ -1818,6 +1835,30 @@ function registerIpcHandlers() {
     return insightService.triggerTest()
   })
 
+  ipcMain.handle('insight:triggerSessionInsight', async (_, payload: {
+    sessionId: string
+    displayName?: string
+    avatarUrl?: string
+  }) => {
+    return insightService.triggerSessionInsight(payload)
+  })
+
+  ipcMain.handle('insight:listProfileStatuses', async (_, sessionIds: string[]) => {
+    return insightProfileService.listProfileStatuses(Array.isArray(sessionIds) ? sessionIds : [])
+  })
+
+  ipcMain.handle('insight:generateProfile', async (_, payload: {
+    sessionId: string
+    displayName?: string
+    avatarUrl?: string
+  }) => {
+    return insightProfileService.generateProfile(payload)
+  })
+
+  ipcMain.handle('insight:cancelProfile', async (_, sessionId?: string) => {
+    return insightProfileService.cancelProfile(sessionId)
+  })
+
   ipcMain.handle('insight:generateFootprintInsight', async (_, payload: {
     rangeLabel: string
     summary: {
@@ -1832,6 +1873,54 @@ function registerIpcHandlers() {
     mentionGroups?: Array<{ displayName?: string; session_id?: string; count?: number }>
   }) => {
     return insightService.generateFootprintInsight(payload)
+  })
+
+  ipcMain.handle('insight:generateMessageInsight', async (_, payload: {
+    sessionId: string
+    displayName?: string
+    avatarUrl?: string
+    targetLocalId?: number
+    targetCreateTime?: number
+    targetMessageKey?: string
+    targetText: string
+    targetSenderName?: string
+    contextCount?: number
+    forceRefresh?: boolean
+  }) => {
+    return insightService.generateMessageInsight(payload)
+  })
+
+  ipcMain.handle('groupSummary:listRecords', async (_, filters?: {
+    sessionId?: string
+    startTime?: number
+    endTime?: number
+    limit?: number
+    offset?: number
+  }) => {
+    return groupSummaryService.listRecords(filters || {})
+  })
+
+  ipcMain.handle('groupSummary:getRecord', async (_, id: string) => {
+    return groupSummaryService.getRecord(id)
+  })
+
+  ipcMain.handle('groupSummary:triggerManual', async (_, payload: {
+    sessionId: string
+    displayName?: string
+    avatarUrl?: string
+    startTime: number
+    endTime: number
+  }) => {
+    return groupSummaryService.triggerManual(payload)
+  })
+
+  ipcMain.handle('groupSummary:triggerDay', async (_, payload: {
+    sessionId: string
+    displayName?: string
+    avatarUrl?: string
+    date: string
+  }) => {
+    return groupSummaryService.triggerDay(payload)
   })
 
   ipcMain.handle('social:saveWeiboCookie', async (_, rawInput: string) => {
@@ -1870,6 +1959,7 @@ function registerIpcHandlers() {
     configService?.clear()
     messagePushService.handleConfigCleared()
     insightService.handleConfigCleared()
+    groupSummaryService.handleConfigCleared()
     return true
   })
 
@@ -2113,7 +2203,7 @@ function registerIpcHandlers() {
 
     try {
       if (action === 'tray') {
-        if (tray) {
+        if (canKeepMainWindowInBackground()) {
           mainWindow.hide()
           return true
         }
@@ -2349,8 +2439,8 @@ function registerIpcHandlers() {
     return chatService.getContactTypeCounts()
   })
 
-  ipcMain.handle('chat:getSessionMessageCounts', async (_, sessionIds: string[]) => {
-    return chatService.getSessionMessageCounts(sessionIds)
+  ipcMain.handle('chat:getSessionMessageCounts', async (_, sessionIds: string[], options?: { preferHintCache?: boolean; bypassSessionCache?: boolean }) => {
+    return chatService.getSessionMessageCounts(sessionIds, options)
   })
 
   ipcMain.handle('chat:enrichSessionsContactInfo', async (_, usernames: string[], options?: {
@@ -3213,7 +3303,8 @@ function registerIpcHandlers() {
             imageAesKey: imageKeys.aesKey,
             resourcesPath,
             userDataPath,
-            logEnabled
+            logEnabled,
+            isPackaged: app.isPackaged
           }
         })
 
@@ -3344,7 +3435,8 @@ function registerIpcHandlers() {
             imageAesKey: imageKeys.aesKey,
             resourcesPath: app.isPackaged ? join(process.resourcesPath, 'resources') : join(app.getAppPath(), 'resources'),
             userDataPath: app.getPath('userData'),
-            logEnabled: cfg.get('logEnabled')
+            logEnabled: cfg.get('logEnabled'),
+            isPackaged: app.isPackaged
           }
         })
 
@@ -3411,7 +3503,8 @@ function registerIpcHandlers() {
             myWxid: String(cfg.getMyWxidCleaned() || '').trim(),
             resourcesPath: app.isPackaged ? join(process.resourcesPath, 'resources') : join(app.getAppPath(), 'resources'),
             userDataPath: app.getPath('userData'),
-            logEnabled: cfg.get('logEnabled')
+            logEnabled: cfg.get('logEnabled'),
+            isPackaged: app.isPackaged
           }
         })
 
@@ -3466,6 +3559,10 @@ function registerIpcHandlers() {
 
   ipcMain.handle('analytics:getTimeDistribution', async () => {
     return analyticsService.getTimeDistribution()
+  })
+
+  ipcMain.handle('analytics:getSelfSentDailyDistribution', async (_, beginTimestamp?: number, endTimestamp?: number, force?: boolean) => {
+    return analyticsService.getSelfSentDailyDistribution(beginTimestamp, endTimestamp, force)
   })
 
   ipcMain.handle('analytics:getExcludedUsernames', async () => {
@@ -4202,6 +4299,7 @@ app.whenReady().then(async () => {
   })
   messagePushService.start()
   insightService.start()
+  groupSummaryService.start()
   await delay(200)
 
   // 已完成引导时，在 Splash 阶段预热核心数据（联系人、消息库索引等）
@@ -4255,18 +4353,7 @@ app.whenReady().then(async () => {
   ensureWeChatRequestHeaderInterceptor()
   mainWindow = createWindow({ autoShow: false })
 
-  let iconName = 'icon.ico';
-  if (process.platform === 'linux') {
-    iconName = 'icon.png';
-  } else if (process.platform === 'darwin') {
-    iconName = 'icon.icns';
-  }
-
-  const isDev = !!process.env.VITE_DEV_SERVER_URL
-
-  const resolvedTrayIcon = isDev
-      ? join(__dirname, `../public/${iconName}`)
-      : join(process.resourcesPath, iconName);
+  const resolvedTrayIcon = resolveAppIconPath()
 
 
   try {
@@ -4344,6 +4431,14 @@ app.whenReady().then(async () => {
   await httpService.autoStart()
 
   app.on('activate', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (!mainWindow.isVisible()) {
+        mainWindow.show()
+      }
+      mainWindow.focus()
+      return
+    }
+
     if (BrowserWindow.getAllWindows().length === 0) {
       mainWindow = createWindow()
     }
@@ -4360,6 +4455,7 @@ const shutdownAppServices = async (): Promise<void> => {
     destroyNotificationWindow()
     messagePushService.stop()
     insightService.stop()
+    groupSummaryService.stop()
     // 兜底：5秒后强制退出，防止某个异步任务卡住导致进程残留
     const forceExitTimer = setTimeout(() => {
       console.warn('[App] Force exit after timeout')
@@ -4388,4 +4484,3 @@ app.on('window-all-closed', () => {
     app.quit()
   }
 })
-

@@ -94,6 +94,7 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [showCloseDialog, setShowCloseDialog] = useState(false)
   const [canMinimizeToTray, setCanMinimizeToTray] = useState(false)
+  const [closeRestoreMethod, setCloseRestoreMethod] = useState<'tray' | 'dock'>('tray')
 
   // 锁定状态
   // const [isLocked, setIsLocked] = useState(false) // Moved to store
@@ -120,6 +121,7 @@ function App() {
   useEffect(() => {
     const removeCloseConfirmListener = window.electronAPI.window.onCloseConfirmRequested((payload) => {
       setCanMinimizeToTray(Boolean(payload.canMinimizeToTray))
+      setCloseRestoreMethod(payload.restoreMethod === 'dock' ? 'dock' : 'tray')
       setShowCloseDialog(true)
     })
 
@@ -685,6 +687,7 @@ function App() {
       <WindowCloseDialog
         open={showCloseDialog}
         canMinimizeToTray={canMinimizeToTray}
+        restoreMethod={closeRestoreMethod}
         onSelect={(action, rememberChoice) => handleWindowCloseAction(action, rememberChoice)}
         onCancel={() => handleWindowCloseAction('cancel')}
       />

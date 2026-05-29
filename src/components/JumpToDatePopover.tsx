@@ -15,6 +15,7 @@ interface JumpToDatePopoverProps {
   messageDateCounts?: Record<string, number>
   loadingDates?: boolean
   loadingDateCounts?: boolean
+  maxDate?: Date
 }
 
 const JumpToDatePopover: React.FC<JumpToDatePopoverProps> = ({
@@ -29,7 +30,8 @@ const JumpToDatePopover: React.FC<JumpToDatePopoverProps> = ({
   hasLoadedMessageDates = false,
   messageDateCounts,
   loadingDates = false,
-  loadingDateCounts = false
+  loadingDateCounts = false,
+  maxDate
 }) => {
   type CalendarViewMode = 'day' | 'month' | 'year'
   const getYearPageStart = (year: number): number => Math.floor(year / 12) * 12
@@ -73,6 +75,14 @@ const JumpToDatePopover: React.FC<JumpToDatePopoverProps> = ({
     return messageDates.has(toDateKey(day))
   }
 
+  const isAfterMaxDate = (day: number): boolean => {
+    if (!maxDate) return false
+    const max = new Date(maxDate)
+    max.setHours(23, 59, 59, 999)
+    const candidate = new Date(calendarDate.getFullYear(), calendarDate.getMonth(), day, 0, 0, 0, 0)
+    return candidate.getTime() > max.getTime()
+  }
+
   const isToday = (day: number): boolean => {
     const today = new Date()
     return day === today.getDate()
@@ -102,6 +112,7 @@ const JumpToDatePopover: React.FC<JumpToDatePopoverProps> = ({
 
   const handleDateClick = (day: number) => {
     if (hasLoadedMessageDates && !hasMessage(day)) return
+    if (isAfterMaxDate(day)) return
     const targetDate = new Date(calendarDate.getFullYear(), calendarDate.getMonth(), day)
     setSelectedDate(targetDate)
     onSelect(targetDate)
@@ -113,7 +124,7 @@ const JumpToDatePopover: React.FC<JumpToDatePopoverProps> = ({
     const classes = ['day-cell']
     if (isToday(day)) classes.push('today')
     if (isSelected(day)) classes.push('selected')
-    if (hasLoadedMessageDates && !hasMessage(day)) classes.push('no-message')
+    if ((hasLoadedMessageDates && !hasMessage(day)) || isAfterMaxDate(day)) classes.push('no-message')
     return classes.join(' ')
   }
 
@@ -225,6 +236,7 @@ const JumpToDatePopover: React.FC<JumpToDatePopoverProps> = ({
               if (day === null) return <div key={index} className="day-cell empty" />
               const dateKey = toDateKey(day)
               const hasMessageOnDay = hasMessage(day)
+              const isDisabled = (hasLoadedMessageDates && !hasMessageOnDay) || isAfterMaxDate(day)
               const count = Number(messageDateCounts?.[dateKey] || 0)
               const showCount = count > 0
               const showCountLoading = hasMessageOnDay && loadingDateCounts && !showCount
@@ -233,7 +245,7 @@ const JumpToDatePopover: React.FC<JumpToDatePopoverProps> = ({
                   key={index}
                   className={getDayClassName(day)}
                   onClick={() => handleDateClick(day)}
-                  disabled={hasLoadedMessageDates && !hasMessageOnDay}
+                  disabled={isDisabled}
                   type="button"
                 >
                   <span className="day-number">{day}</span>
