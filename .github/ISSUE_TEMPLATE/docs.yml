@@ -7,6 +7,14 @@ body:
     attributes:
       value: |
         优秀的文档和代码一样重要。感谢你帮助我们完善文档！
+  - type: input
+    id: confirm-unique
+    attributes:
+      label: 确认唯一性
+      description: 请输入：我已确认没有相同问题出现
+      placeholder: 我已确认没有相同问题出现
+    validations:
+      required: true
   - type: dropdown
     id: doc-type
     attributes:

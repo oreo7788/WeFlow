@@ -3390,16 +3390,25 @@
   }
 
   &.insight-social-tab {
-    --insight-moments-column-width: 76px;
-    --insight-social-column-width: minmax(220px, 300px);
-    --insight-status-column-width: 82px;
-    --insight-social-list-grid: minmax(0, 1fr) var(--insight-moments-column-width) var(--insight-social-column-width) var(--insight-status-column-width);
+    --insight-moments-column-width: 44px;
+    --insight-profile-column-width: 78px;
+    --insight-social-column-width: minmax(184px, 230px);
+    --insight-status-column-width: 70px;
+    --insight-social-list-grid: minmax(0, 1fr) var(--insight-moments-column-width) var(--insight-profile-column-width) var(--insight-social-column-width) var(--insight-status-column-width);
 
     .anti-revoke-list-header {
       grid-template-columns: var(--insight-social-list-grid);
-      gap: 14px;
+      gap: 8px;
+      padding-left: 14px;
+      padding-right: 10px;
 
       .insight-moments-column-title {
+        display: flex;
+        justify-content: center;
+        color: var(--text-tertiary);
+      }
+
+      .insight-profile-column-title {
         display: flex;
         justify-content: center;
         color: var(--text-tertiary);
@@ -3420,11 +3429,19 @@
       display: grid;
       grid-template-columns: var(--insight-social-list-grid);
       align-items: center;
-      gap: 14px;
+      gap: 8px;
+      padding-left: 14px;
+      padding-right: 10px;
     }
 
     .anti-revoke-row-main {
       min-width: 0;
+      gap: 8px;
+
+      .anti-revoke-check {
+        width: 16px;
+        height: 16px;
+      }
     }
 
     .insight-moments-cell {
@@ -3433,6 +3450,92 @@
       align-items: center;
       justify-content: center;
       min-height: 30px;
+    }
+
+    .insight-profile-cell {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 30px;
+    }
+
+    .insight-profile-status-btn {
+      position: relative;
+      width: 74px;
+      height: 28px;
+      border-radius: 999px;
+      border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
+      background: color-mix(in srgb, var(--bg-secondary) 90%, var(--bg-primary) 10%);
+      color: var(--text-secondary);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      font-size: 12px;
+      line-height: 1;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease, opacity 0.16s ease;
+
+      &:disabled {
+        cursor: not-allowed;
+        opacity: 0.48;
+      }
+
+      &:not(:disabled)::after {
+        content: attr(data-tooltip);
+        position: absolute;
+        left: 50%;
+        bottom: calc(100% + 8px);
+        transform: translateX(-50%) translateY(2px);
+        z-index: 8;
+        max-width: 180px;
+        width: max-content;
+        padding: 6px 8px;
+        border-radius: 6px;
+        background: color-mix(in srgb, var(--text-primary) 92%, #000 8%);
+        color: var(--bg-primary);
+        font-size: 12px;
+        line-height: 1.2;
+        pointer-events: none;
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s ease;
+      }
+
+      &:not(:disabled):hover::after,
+      &:not(:disabled):focus-visible::after {
+        opacity: 1;
+        visibility: visible;
+        transform: translateX(-50%) translateY(0);
+      }
+
+      .profile-status-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--text-tertiary) 86%, transparent);
+        flex-shrink: 0;
+      }
+
+      &.ready {
+        color: var(--primary);
+        border-color: color-mix(in srgb, var(--primary) 35%, var(--border-color));
+        background: color-mix(in srgb, var(--primary) 10%, var(--bg-secondary));
+      }
+
+      &.running {
+        color: color-mix(in srgb, var(--primary) 70%, var(--text-primary) 30%);
+        border-color: color-mix(in srgb, var(--primary) 30%, var(--border-color));
+        background: color-mix(in srgb, var(--primary) 9%, var(--bg-secondary));
+      }
+
+      &.failed {
+        color: color-mix(in srgb, var(--danger) 72%, var(--text-primary) 28%);
+        border-color: color-mix(in srgb, var(--danger) 24%, var(--border-color));
+        background: color-mix(in srgb, var(--danger) 8%, var(--bg-secondary));
+      }
     }
 
     .insight-moments-toggle {
@@ -3490,23 +3593,32 @@
 
     .insight-social-binding-cell {
       min-width: 0;
+      display: flex;
+      align-items: flex-start;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .insight-social-binding-controls {
+      min-width: 0;
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 8px 10px;
+      grid-template-columns: minmax(92px, 1fr) auto;
+      gap: 6px;
       align-items: center;
+      flex: 1 1 100%;
     }
 
     .insight-social-binding-input-wrap {
       min-width: 0;
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 5px;
     }
 
     .binding-platform-chip {
       flex-shrink: 0;
       border-radius: 999px;
-      padding: 2px 7px;
+      padding: 2px 6px;
       font-size: 11px;
       color: var(--text-secondary);
       border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
@@ -3536,12 +3648,18 @@
       display: inline-flex;
       align-items: center;
       justify-self: flex-end;
-      gap: 8px;
+      gap: 4px;
+
+      .btn {
+        min-width: 0;
+        padding-left: 8px;
+        padding-right: 8px;
+      }
     }
 
     .insight-social-binding-feedback {
-      grid-column: 1 / span 2;
       min-height: 18px;
+      flex: 1 1 100%;
     }
 
     .binding-feedback {
@@ -3563,6 +3681,11 @@
       align-items: flex-end;
       max-width: none;
       min-width: 0;
+
+      .status-badge {
+        padding-left: 8px;
+        padding-right: 8px;
+      }
     }
   }
 
@@ -3605,6 +3728,7 @@
         grid-template-columns: minmax(0, 1fr) auto;
 
         .insight-moments-column-title,
+        .insight-profile-column-title,
         .insight-social-column-title {
           display: none;
         }
@@ -3617,12 +3741,14 @@
       }
 
       .insight-moments-cell,
+      .insight-profile-cell,
       .insight-social-binding-cell,
       .anti-revoke-row-status {
         width: 100%;
       }
 
-      .insight-moments-cell {
+      .insight-moments-cell,
+      .insight-profile-cell {
         justify-content: flex-start;
       }
 

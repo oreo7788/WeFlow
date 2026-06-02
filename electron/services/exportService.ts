@@ -151,13 +151,21 @@ export class ExportService {
     return error
   }
 
-  setRuntimeConfig(config: { dbPath?: string; decryptKey?: string; myWxid?: string; imageXorKey?: unknown; imageAesKey?: string } | null): void {
+  setRuntimeConfig(config: { dbPath?: string; decryptKey?: string; myWxid?: string; imageXorKey?: unknown; imageAesKey?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean } | null): void {
     this.runtimeConfig = config
     imageDecryptService.setRuntimeConfig({
       dbPath: config?.dbPath,
       myWxid: config?.myWxid,
       imageXorKey: config?.imageXorKey,
       imageAesKey: config?.imageAesKey
+    })
+    chatService.setRuntimeConfig({
+      dbPath: config?.dbPath,
+      decryptKey: config?.decryptKey,
+      myWxid: config?.myWxid,
+      resourcesPath: config?.resourcesPath,
+      appPath: config?.appPath,
+      isPackaged: config?.isPackaged
     })
   }
 
@@ -4933,6 +4941,1855 @@ export class ExportService {
         ...(isGroup && { groupId: sessionId }),
         ...(sessionAvatar && { groupAvatar: sessionAvatar })
       }
+    }
+  }
+
+  /**
+   * 导出单个会话为 ChatLab 格式（并行优化版本）
+   */
+  async exportSessionToChatLab(
+    sessionId: string,
+    outputPath: string,
+    options: ExportOptions,
+    onProgress?: (progress: ExportProgress) => void,
+    control?: ExportTaskControl
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      this.throwIfStopRequested(control)
+      const conn = await this.ensureConnected()
+      if (!conn.success || !conn.cleanedWxid) return { success: false, error: conn.error }
+
+      const cleanedMyWxid = conn.cleanedWxid
+      const isGroup = sessionId.includes('@chatroom')
+      const rawMyWxid = this.getConfiguredMyWxid()
+
+      const sessionInfo = await this.getContactInfo(sessionId)
+      const myInfo = await this.getContactInfo(cleanedMyWxid)
+      const contactCache = new Map<string, { success: boolean; contact?: any; error?: string }>()
+      const getContactCached = async (username: string) => {
+        if (contactCache.has(username)) {
+          return contactCache.get(username)!
+        }
+        const result = await wcdbService.getContact(username)
+        contactCache.set(username, result)
+        return result
+      }
+
+      onProgress?.({
+        current: 0,
+        total: 100,
+        currentSession: sessionInfo.displayName,
+        phase: 'preparing'
+      })
+
+      const collectParams = this.resolveCollectParams(options)
+      const collectProgressReporter = this.createCollectProgressReporter(sessionInfo.displayName, onProgress, 5)
+      const collected = await this.collectMessages(
+        sessionId,
+        cleanedMyWxid,
+        options.dateRange,
+        options.senderUsername,
+        collectParams.mode,
+        collectParams.targetMediaTypes,
+        control,
+        collectProgressReporter
+      )
+      const allMessages = collected.rows
+      const totalMessages = allMessages.length
+
+      // 如果没有消息,不创建文件
+      if (totalMessages === 0) {
+        return { success: false, error: await this.buildNoMessagesError(sessionId, collected) }
+      }
+
+      await this.hydrateEmojiCaptionsForMessages(sessionId, allMessages, control)
+
+      const voiceMessages = options.exportVoiceAsText
+        ? allMessages.filter(msg => msg.localType === 34)
+        : []
+
+      if (options.exportVoiceAsText && voiceMessages.length > 0) {
+        await this.ensureVoiceModel(onProgress)
+      }
+
+      const senderUsernames = new Set<string>()
+      let senderScanIndex = 0
+      for (const msg of allMessages) {
+        if ((senderScanIndex++ & 0x7f) === 0) {
+          this.throwIfStopRequested(control)
+        }
+        if (msg.senderUsername) senderUsernames.add(msg.senderUsername)
+      }
+      senderUsernames.add(sessionId)
+      senderUsernames.add(cleanedMyWxid)
+      await this.preloadContacts(senderUsernames, contactCache)
+
+      if (isGroup) {
+        this.throwIfStopRequested(control)
+        await this.mergeGroupMembers(sessionId, collected.memberSet, options.exportAvatars === true)
+      }
+
+      // ========== 获取群昵称并更新到 memberSet ==========
+      const groupNicknameCandidates = isGroup
+        ? this.buildGroupNicknameIdCandidates([
+          ...Array.from(collected.memberSet.keys()),
+          ...allMessages.map(msg => msg.senderUsername),
+          cleanedMyWxid
+        ])
+        : []
+      const groupNicknamesMap = isGroup
+        ? await this.getGroupNicknamesForRoom(sessionId, groupNicknameCandidates)
+        : new Map<string, string>()
+
+      // 将群昵称更新到 memberSet 中
+      if (isGroup && groupNicknamesMap.size > 0) {
+        for (const [username, info] of collected.memberSet) {
+          // 尝试多种方式查找群昵称（支持大小写）
+          const groupNickname = this.resolveGroupNicknameByCandidates(groupNicknamesMap, [username]) || ''
+          if (groupNickname) {
+            info.member.groupNickname = groupNickname
+          }
+        }
+      }
+
+      const allMessagesInCursorOrder = allMessages
+
+      const { exportMediaEnabled, mediaRootDir, mediaRelativePrefix } = this.getMediaLayout(outputPath, options)
+
+      // ========== 阶段1：并行导出媒体文件 ==========
+      const mediaMessages = this.collectMediaMessagesForExport(allMessagesInCursorOrder, options)
+
+      const mediaCache = new Map<string, MediaExportItem | null>()
+      const mediaDirCache = new Set<string>()
+      const beforeMediaDoneFiles = this.getMediaDoneFilesCount()
+
+      if (mediaMessages.length > 0) {
+        await this.preloadMediaLookupCaches(sessionId, mediaMessages, {
+          exportImages: options.exportImages,
+          exportVideos: options.exportVideos
+        }, control)
+        const voiceMediaMessages = mediaMessages.filter(msg => msg.localType === 34)
+        if (voiceMediaMessages.length > 0) {
+          await this.preloadVoiceWavCache(sessionId, voiceMediaMessages, control)
+        }
+
+        onProgress?.({
+          current: 20,
+          total: 100,
+          currentSession: sessionInfo.displayName,
+          phase: 'exporting-media',
+          phaseProgress: 0,
+          phaseTotal: mediaMessages.length,
+          phaseLabel: this.formatMediaPhaseLabel(0, mediaMessages.length, beforeMediaDoneFiles),
+          ...this.getMediaTelemetrySnapshot(),
+          estimatedTotalMessages: totalMessages
+        })
+
+        // 并行导出媒体，并发数跟随导出设置
+        const mediaConcurrency = this.getClampedConcurrency(options.exportConcurrency)
+        let mediaExported = 0
+        await parallelLimit(mediaMessages, mediaConcurrency, async (msg) => {
+          this.throwIfStopRequested(control)
+          const mediaKey = this.getMediaCacheKey(msg)
+          if (!mediaCache.has(mediaKey)) {
+            const mediaItem = await this.exportMediaForMessage(msg, sessionId, mediaRootDir, mediaRelativePrefix, {
+              exportImages: options.exportImages,
+              exportVoices: options.exportVoices,
+              exportVideos: options.exportVideos,
+              exportEmojis: options.exportEmojis,
+              exportFiles: options.exportFiles,
+              maxFileSizeMb: options.maxFileSizeMb,
+              exportVoiceAsText: options.exportVoiceAsText,
+              includeVideoPoster: options.format === 'html',
+              dirCache: mediaDirCache,
+              control
+            })
+            mediaCache.set(mediaKey, mediaItem)
+          }
+          mediaExported++
+          if (mediaExported % 5 === 0 || mediaExported === mediaMessages.length) {
+            onProgress?.({
+              current: 20,
+              total: 100,
+              currentSession: sessionInfo.displayName,
+              phase: 'exporting-media',
+              phaseProgress: mediaExported,
+              phaseTotal: mediaMessages.length,
+              phaseLabel: this.formatMediaPhaseLabel(mediaExported, mediaMessages.length, beforeMediaDoneFiles),
+              ...this.getMediaTelemetrySnapshot()
+            })
+          }
+        })
+      }
+      const fileOnlyExportFailure = this.buildFileOnlyExportFailure(options, mediaMessages, beforeMediaDoneFiles)
+      if (fileOnlyExportFailure) return fileOnlyExportFailure
+
+      // ========== 阶段2：并行语音转文字 ==========
+      const voiceTranscriptMap = new Map<string, string>()
+
+      if (voiceMessages.length > 0) {
+        await this.preloadVoiceWavCache(sessionId, voiceMessages, control)
+
+        onProgress?.({
+          current: 40,
+          total: 100,
+          currentSession: sessionInfo.displayName,
+          phase: 'exporting-voice',
+          phaseProgress: 0,
+          phaseTotal: voiceMessages.length,
+          phaseLabel: `语音转文字 0/${voiceMessages.length}`,
+          estimatedTotalMessages: totalMessages
+        })
+
+        // 并行转写语音，限制 4 个并发（转写比较耗资源）
+        const VOICE_CONCURRENCY = 4
+        let voiceTranscribed = 0
+        await parallelLimit(voiceMessages, VOICE_CONCURRENCY, async (msg) => {
+          this.throwIfStopRequested(control)
+          const transcript = await this.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername)
+          voiceTranscriptMap.set(this.getStableMessageKey(msg), transcript)
+          voiceTranscribed++
+          onProgress?.({
+            current: 40,
+            total: 100,
+            currentSession: sessionInfo.displayName,
+            phase: 'exporting-voice',
+            phaseProgress: voiceTranscribed,
+            phaseTotal: voiceMessages.length,
+            phaseLabel: `语音转文字 ${voiceTranscribed}/${voiceMessages.length}`
+          })
+        })
+      }
+
+      // ========== 阶段3：构建消息列表 ==========
+      onProgress?.({
+        current: 60,
+        total: 100,
+        currentSession: sessionInfo.displayName,
+        phase: 'exporting',
+        estimatedTotalMessages: totalMessages,
+        collectedMessages: totalMessages,
+        exportedMessages: 0
+      })
+
+      const chatLabMessages: ChatLabMessage[] = []
+      const senderProfileMap = new Map<string, ExportDisplayProfile>()
+      let messageIndex = 0
+      for (const msg of allMessages) {
+        if ((messageIndex++ & 0x7f) === 0) {
+          this.throwIfStopRequested(control)
+        }
+        const memberInfo = collected.memberSet.get(msg.senderUsername)?.member || {
+          platformId: msg.senderUsername,
+          accountName: msg.senderUsername,
+          groupNickname: undefined
+        }
+
+        // 如果 memberInfo 中没有群昵称，尝试从 groupNicknamesMap 获取
+        const groupNickname = memberInfo.groupNickname
+          || (isGroup ? this.resolveGroupNicknameByCandidates(groupNicknamesMap, [msg.senderUsername]) : '')
+          || ''
+        const senderProfile = isGroup
+          ? await this.resolveExportDisplayProfile(
+            msg.senderUsername || cleanedMyWxid,
+            options.displayNamePreference,
+            getContactCached,
+            groupNicknamesMap,
+            msg.isSend ? (myInfo.displayName || cleanedMyWxid) : (memberInfo.accountName || msg.senderUsername || ''),
+            msg.isSend ? [rawMyWxid, cleanedMyWxid] : []
+          )
+          : {
+            wxid: msg.senderUsername || cleanedMyWxid,
+            nickname: memberInfo.accountName || msg.senderUsername || '',
+            remark: '',
+            alias: '',
+            groupNickname,
+            displayName: memberInfo.accountName || msg.senderUsername || ''
+          }
+        if (senderProfile.wxid && !senderProfileMap.has(senderProfile.wxid)) {
+          senderProfileMap.set(senderProfile.wxid, senderProfile)
+        }
+
+        // 确定消息内容
+        let content: string | null
+        const mediaKey = this.getMediaCacheKey(msg)
+        const mediaItem = mediaCache.get(mediaKey)
+        if (msg.localType === 34 && options.exportVoiceAsText) {
+          // 使用预先转写的文字
+          content = voiceTranscriptMap.get(this.getStableMessageKey(msg)) || '[语音消息 - 转文字失败]'
+        } else if (mediaItem && msg.localType !== 47) {
+          content = mediaItem.relativePath
+        } else {
+          content = this.parseMessageContent(
+            msg.content,
+            msg.localType,
+            sessionId,
+            msg.createTime,
+            cleanedMyWxid,
+            msg.senderUsername,
+            msg.isSend,
+            msg.emojiCaption
+          )
+        }
+        if (this.isReadableSystemMessage(msg.localType, msg.content)) {
+          content = this.extractReadableSystemMessageText(msg.content) || content
+        }
+
+        // 转账消息：追加 "谁转账给谁" 信息
+        if (content && this.isTransferExportContent(content) && msg.content) {
+          const transferDesc = await this.resolveTransferDesc(
+            msg.content,
+            cleanedMyWxid,
+            groupNicknamesMap,
+            async (username) => {
+              const info = await this.getContactInfo(username)
+              return info.displayName || username
+            }
+          )
+          if (transferDesc) {
+            content = this.appendTransferDesc(content, transferDesc)
+          }
+        }
+
+        const markdownLinkContent = this.formatLinkCardExportText(msg.content, msg.localType, 'markdown')
+        if (markdownLinkContent) {
+          content = markdownLinkContent
+        }
+
+        const message: ChatLabMessage = {
+          sender: msg.senderUsername,
+          accountName: senderProfile.displayName || memberInfo.accountName,
+          groupNickname: (senderProfile.groupNickname || groupNickname) || undefined,
+          timestamp: msg.createTime,
+          type: this.convertMessageType(msg.localType, msg.content),
+          content: content
+        }
+
+        const platformMessageId = this.normalizeUnsignedIntToken(msg.serverIdRaw ?? msg.serverId)
+        if (platformMessageId !== '0') {
+          message.platformMessageId = platformMessageId
+        }
+
+        const replyToMessageId = this.extractChatLabReplyToMessageId(msg.content)
+        if (replyToMessageId) {
+          message.replyToMessageId = replyToMessageId
+        }
+
+        // 如果有聊天记录，添加为嵌套字段
+        if (msg.chatRecordList && msg.chatRecordList.length > 0) {
+          const chatRecords: any[] = []
+
+          for (const record of msg.chatRecordList) {
+            // 解析时间戳 (格式: "YYYY-MM-DD HH:MM:SS")
+            let recordTimestamp = msg.createTime
+            if (record.sourcetime) {
+              try {
+                const timeParts = record.sourcetime.match(/(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})/)
+                if (timeParts) {
+                  const date = new Date(
+                    parseInt(timeParts[1]),
+                    parseInt(timeParts[2]) - 1,
+                    parseInt(timeParts[3]),
+                    parseInt(timeParts[4]),
+                    parseInt(timeParts[5]),
+                    parseInt(timeParts[6])
+                  )
+                  recordTimestamp = Math.floor(date.getTime() / 1000)
+                }
+              } catch (e) {
+                console.error('解析聊天记录时间失败:', e)
+              }
+            }
+
+            // 转换消息类型
+            let recordType = 0 // TEXT
+            let recordContent = record.datadesc || record.datatitle || ''
+
+            switch (record.datatype) {
+              case 1:
+                recordType = 0 // TEXT
+                break
+              case 3:
+                recordType = 1 // IMAGE
+                recordContent = '[图片]'
+                break
+              case 8:
+              case 49:
+                recordType = 4 // FILE
+                recordContent = record.datatitle ? `[文件] ${record.datatitle}` : '[文件]'
+                break
+              case 34:
+                recordType = 2 // VOICE
+                recordContent = '[语音消息]'
+                break
+              case 43:
+                recordType = 3 // VIDEO
+                recordContent = '[视频]'
+                break
+              case 47:
+                recordType = 5 // EMOJI
+                recordContent = '[表情包]'
+                break
+              default:
+                recordType = 0
+                recordContent = record.datadesc || record.datatitle || '[消息]'
+            }
+
+            const chatRecord: any = {
+              sender: record.sourcename || 'unknown',
+              accountName: record.sourcename || 'unknown',
+              timestamp: recordTimestamp,
+              type: recordType,
+              content: recordContent
+            }
+
+            // 添加头像（如果启用导出头像）
+            if (options.exportAvatars && record.sourceheadurl) {
+              chatRecord.avatar = record.sourceheadurl
+            }
+
+            chatRecords.push(chatRecord)
+
+            // 添加成员信息到 memberSet
+            if (record.sourcename && !collected.memberSet.has(record.sourcename)) {
+              const newMember: ChatLabMember = {
+                platformId: record.sourcename,
+                accountName: record.sourcename
+              }
+              if (options.exportAvatars && record.sourceheadurl) {
+                newMember.avatar = record.sourceheadurl
+              }
+              collected.memberSet.set(record.sourcename, {
+                member: newMember,
+                avatarUrl: record.sourceheadurl
+              })
+            }
+          }
+
+          message.chatRecords = chatRecords
+        }
+
+        chatLabMessages.push(message)
+        if ((chatLabMessages.length % 200) === 0 || chatLabMessages.length === totalMessages) {
+          const exportProgress = 60 + Math.floor((chatLabMessages.length / totalMessages) * 20)
+          onProgress?.({
+            current: exportProgress,
+            total: 100,
+            currentSession: sessionInfo.displayName,
+            phase: 'exporting',
+            estimatedTotalMessages: totalMessages,
+            collectedMessages: totalMessages,
+            exportedMessages: chatLabMessages.length
+          })
+        }
+      }
+
+      const avatarMap = options.exportAvatars
+        ? await this.exportAvatars(
+          [
+            ...Array.from(collected.memberSet.entries()).map(([username, info]) => ({
+              username,
+              avatarUrl: info.avatarUrl
+            })),
+            { username: sessionId, avatarUrl: sessionInfo.avatarUrl }
+          ]
+        )
+        : new Map<string, string>()
+
+      const sessionAvatar = avatarMap.get(sessionId)
+      const members = await Promise.all(Array.from(collected.memberSet.values()).map(async (info) => {
+        const profile = isGroup
+          ? (senderProfileMap.get(info.member.platformId) || await this.resolveExportDisplayProfile(
+            info.member.platformId,
+            options.displayNamePreference,
+            getContactCached,
+            groupNicknamesMap,
+            info.member.accountName || info.member.platformId,
+            this.isSameWxid(info.member.platformId, cleanedMyWxid) ? [rawMyWxid, cleanedMyWxid] : []
+          ))
+          : null
+        const member = profile
+          ? {
+            ...info.member,
+            accountName: profile.displayName || info.member.accountName,
+            groupNickname: profile.groupNickname || info.member.groupNickname
+          }
+          : info.member
+        const avatar = avatarMap.get(info.member.platformId)
+        return avatar ? { ...member, avatar } : member
+      }))
+
+      const { chatlab, meta } = this.getExportMeta(sessionId, sessionInfo, isGroup, sessionAvatar)
+
+      const chatLabExport: ChatLabExport = {
+        chatlab,
+        meta,
+        members,
+        messages: chatLabMessages
+      }
+
+      onProgress?.({
+        current: 80,
+        total: 100,
+        currentSession: sessionInfo.displayName,
+        phase: 'writing',
+        estimatedTotalMessages: totalMessages,
+        collectedMessages: totalMessages,
+        exportedMessages: totalMessages
+      })
+
+      if (options.format === 'chatlab-jsonl') {
+        const lines: string[] = []
+        lines.push(JSON.stringify({
+          _type: 'header',
+          chatlab: chatLabExport.chatlab,
+          meta: chatLabExport.meta
+        }))
+        for (const member of chatLabExport.members) {
+          this.throwIfStopRequested(control)
+          lines.push(JSON.stringify({ _type: 'member', ...member }))
+        }
+        for (const message of chatLabExport.messages) {
+          this.throwIfStopRequested(control)
+          lines.push(JSON.stringify({ _type: 'message', ...message }))
+        }
+        this.throwIfStopRequested(control)
+        await this.recordCreatedFileBeforeWrite(outputPath, control)
+        await fs.promises.writeFile(outputPath, lines.join('\n'), 'utf-8')
+      } else {
+        this.throwIfStopRequested(control)
+        await this.recordCreatedFileBeforeWrite(outputPath, control)
+        await fs.promises.writeFile(outputPath, JSON.stringify(chatLabExport, null, 2), 'utf-8')
+      }
+
+      onProgress?.({
+        current: 100,
+        total: 100,
+        currentSession: sessionInfo.displayName,
+        phase: 'complete',
+        estimatedTotalMessages: totalMessages,
+        collectedMessages: totalMessages,
+        exportedMessages: totalMessages,
+        writtenFiles: 1
+      })
+
+      return { success: true }
+    } catch (e) {
+      if (this.isStopError(e)) {
+        return { success: false, error: '导出任务已停止' }
+      }
+      if (this.isPauseError(e)) {
+        return { success: false, error: '导出任务已暂停' }
+      }
+      return { success: false, error: String(e) }
+    }
+  }
+
+  /**
+   * 导出单个会话为详细 JSON 格式（原项目格式）- 并行优化版本
+   */
+  async exportSessionToDetailedJson(
+    sessionId: string,
+    outputPath: string,
+    options: ExportOptions,
+    onProgress?: (progress: ExportProgress) => void,
+    control?: ExportTaskControl
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      this.throwIfStopRequested(control)
+      const conn = await this.ensureConnected()
+      if (!conn.success || !conn.cleanedWxid) return { success: false, error: conn.error }
+
+      const cleanedMyWxid = conn.cleanedWxid
+      const isGroup = sessionId.includes('@chatroom')
+      const rawMyWxid = this.getConfiguredMyWxid()
+
+      const sessionInfo = await this.getContactInfo(sessionId)
+      const myInfo = await this.getContactInfo(cleanedMyWxid)
+
+      const contactCache = new Map<string, { success: boolean; contact?: any; error?: string }>()
+      const getContactCached = async (username: string) => {
+        if (contactCache.has(username)) {
+          return contactCache.get(username)!
+        }
+        const result = await wcdbService.getContact(username)
+        contactCache.set(username, result)
+        return result
+      }
+
+      onProgress?.({
+        current: 0,
+        total: 100,
+        currentSession: sessionInfo.displayName,
+        phase: 'preparing'
+      })
+
+      const collectParams = this.resolveCollectParams(options)
+      const collectProgressReporter = this.createCollectProgressReporter(sessionInfo.displayName, onProgress, 5)
+      const collected = await this.collectMessages(
+        sessionId,
+        cleanedMyWxid,
+        options.dateRange,
+        options.senderUsername,
+        collectParams.mode,
+        collectParams.targetMediaTypes,
+        control,
+        collectProgressReporter
+      )
+      const totalMessages = collected.rows.length
+
+      // 如果没有消息,不创建文件
+      if (totalMessages === 0) {
+        return { success: false, error: await this.buildNoMessagesError(sessionId, collected) }
+      }
+
+      await this.hydrateEmojiCaptionsForMessages(sessionId, collected.rows, control)
+
+      // 解析引用消息
+      await this.resolveQuotedMessagesForExport(collected.rows, sessionId)
+
+      const voiceMessages = options.exportVoiceAsText
+        ? collected.rows.filter(msg => msg.localType === 34)
+        : []
+
+      if (options.exportVoiceAsText && voiceMessages.length > 0) {
+        await this.ensureVoiceModel(onProgress)
+      }
+
+      const senderUsernames = new Set<string>()
+      let senderScanIndex = 0
+      for (const msg of collected.rows) {
+        if ((senderScanIndex++ & 0x7f) === 0) {
+          this.throwIfStopRequested(control)
+        }
+        if (msg.senderUsername) senderUsernames.add(msg.senderUsername)
+      }
+      senderUsernames.add(sessionId)
+      await this.preloadContacts(senderUsernames, contactCache)
+      const senderInfoMap = await this.preloadContactInfos([
+        ...Array.from(senderUsernames.values()),
+        cleanedMyWxid
+      ])
+
+      const { exportMediaEnabled, mediaRootDir, mediaRelativePrefix } = this.getMediaLayout(outputPath, options)
+
+      // ========== 阶段1：并行导出媒体文件 ==========
+      const mediaMessages = this.collectMediaMessagesForExport(collected.rows, options)
+
+      const mediaCache = new Map<string, MediaExportItem | null>()
+      const mediaDirCache = new Set<string>()
+      const beforeMediaDoneFiles = this.getMediaDoneFilesCount()
+
+      if (mediaMessages.length > 0) {
+        await this.preloadMediaLookupCaches(sessionId, mediaMessages, {
+          exportImages: options.exportImages,
+          exportVideos: options.exportVideos
+        }, control)
+        const voiceMediaMessages = mediaMessages.filter(msg => msg.localType === 34)
+        if (voiceMediaMessages.length > 0) {
+          await this.preloadVoiceWavCache(sessionId, voiceMediaMessages, control)
+        }
+
+        onProgress?.({
+          current: 15,
+          total: 100,
+          currentSession: sessionInfo.displayName,
+          phase: 'exporting-media',
+          phaseProgress: 0,
+          phaseTotal: mediaMessages.length,
+          phaseLabel: this.formatMediaPhaseLabel(0, mediaMessages.length, beforeMediaDoneFiles),
+          ...this.getMediaTelemetrySnapshot(),
+          estimatedTotalMessages: totalMessages
+        })
+
+        const mediaConcurrency = this.getClampedConcurrency(options.exportConcurrency)
+        let mediaExported = 0
+        await parallelLimit(mediaMessages, mediaConcurrency, async (msg) => {
+          this.throwIfStopRequested(control)
+          const mediaKey = this.getMediaCacheKey(msg)
+          if (!mediaCache.has(mediaKey)) {
+            const mediaItem = await this.exportMediaForMessage(msg, sessionId, mediaRootDir, mediaRelativePrefix, {
+              exportImages: options.exportImages,
+              exportVoices: options.exportVoices,
+              exportVideos: options.exportVideos,
+              exportEmojis: options.exportEmojis,
+              exportFiles: options.exportFiles,
+              maxFileSizeMb: options.maxFileSizeMb,
+              exportVoiceAsText: options.exportVoiceAsText,
+              includeVideoPoster: options.format === 'html',
+              dirCache: mediaDirCache,
+              control
+            })
+            mediaCache.set(mediaKey, mediaItem)
+          }
+          mediaExported++
+          if (mediaExported % 5 === 0 || mediaExported === mediaMessages.length) {
+            onProgress?.({
+              current: 15,
+              total: 100,
+              currentSession: sessionInfo.displayName,
+              phase: 'exporting-media',
+              phaseProgress: mediaExported,
+              phaseTotal: mediaMessages.length,
+              phaseLabel: this.formatMediaPhaseLabel(mediaExported, mediaMessages.length, beforeMediaDoneFiles),
+              ...this.getMediaTelemetrySnapshot()
+            })
+          }
+        })
+      }
+      const fileOnlyExportFailure = this.buildFileOnlyExportFailure(options, mediaMessages, beforeMediaDoneFiles)
+      if (fileOnlyExportFailure) return fileOnlyExportFailure
+
+      // ========== 阶段2：并行语音转文字 ==========
+      const voiceTranscriptMap = new Map<string, string>()
+
+      if (voiceMessages.length > 0) {
+        await this.preloadVoiceWavCache(sessionId, voiceMessages, control)
+
+        onProgress?.({
+          current: 35,
+          total: 100,
+          currentSession: sessionInfo.displayName,
+          phase: 'exporting-voice',
+          phaseProgress: 0,
+          phaseTotal: voiceMessages.length,
+          phaseLabel: `语音转文字 0/${voiceMessages.length}`,
+          estimatedTotalMessages: totalMessages
+        })
+
+        const VOICE_CONCURRENCY = 4
+        let voiceTranscribed = 0
+        await parallelLimit(voiceMessages, VOICE_CONCURRENCY, async (msg) => {
+          this.throwIfStopRequested(control)
+          const transcript = await this.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername)
+          voiceTranscriptMap.set(this.getStableMessageKey(msg), transcript)
+          voiceTranscribed++
+          onProgress?.({
+            current: 35,
+            total: 100,
+            currentSession: sessionInfo.displayName,
+            phase: 'exporting-voice',
+            phaseProgress: voiceTranscribed,
+            phaseTotal: voiceMessages.length,
+            phaseLabel: `语音转文字 ${voiceTranscribed}/${voiceMessages.length}`
+          })
+        })
+      }
+
+      // ========== 预加载群昵称（用于名称显示偏好） ==========
+      const groupNicknameCandidates = isGroup
+        ? this.buildGroupNicknameIdCandidates([
+          ...Array.from(senderUsernames.values()),
+          ...collected.rows.map(msg => msg.senderUsername),
+          cleanedMyWxid
+        ])
+        : []
+      const groupNicknamesMap = isGroup
+        ? await this.getGroupNicknamesForRoom(sessionId, groupNicknameCandidates)
+        : new Map<string, string>()
+
+      // ========== 阶段3：构建消息列表 ==========
+      onProgress?.({
+        current: 55,
+        total: 100,
+        currentSession: sessionInfo.displayName,
+        phase: 'exporting',
+        estimatedTotalMessages: totalMessages,
+        collectedMessages: totalMessages,
+        exportedMessages: 0
+      })
+
+      const allMessages: any[] = []
+      const senderProfileMap = new Map<string, {
+        displayName: string
+        nickname: string
+        remark: string
+        groupNickname: string
+      }>()
+      const transferCandidates: Array<{ xml: string; messageRef: any }> = []
+      let needSort = false
+      let lastCreateTime = Number.NEGATIVE_INFINITY
+      let messageIndex = 0
+      for (const msg of collected.rows) {
+        if ((messageIndex++ & 0x7f) === 0) {
+          this.throwIfStopRequested(control)
+        }
+        const senderInfo = senderInfoMap.get(msg.senderUsername) || { displayName: msg.senderUsername || '' }
+        const sourceMatch = /<msgsource>[\s\S]*?<\/msgsource>/i.exec(msg.content || '')
+        const source = sourceMatch ? sourceMatch[0] : ''
+
+        let content: string | null
+        const mediaKey = this.getMediaCacheKey(msg)
+        const mediaItem = mediaCache.get(mediaKey)
+
+        if (msg.localType === 34 && options.exportVoiceAsText) {
+          content = voiceTranscriptMap.get(this.getStableMessageKey(msg)) || '[语音消息 - 转文字失败]'
+        } else if (mediaItem && msg.localType !== 47) {
+          content = mediaItem.relativePath
+        } else {
+          content = this.parseMessageContent(
+            msg.content,
+            msg.localType,
+            undefined,
+            undefined,
+            cleanedMyWxid,
+            msg.senderUsername,
+            msg.isSend,
+            msg.emojiCaption
+          )
+        }
+        if (this.isReadableSystemMessage(msg.localType, msg.content)) {
+          content = this.extractReadableSystemMessageText(msg.content) || content
+        }
+
+        const quotedReplyDisplay = await this.resolveQuotedReplyDisplayWithNames({
+          content: msg.content,
+          isGroup,
+          displayNamePreference: options.displayNamePreference,
+          getContact: getContactCached,
+          groupNicknamesMap,
+          cleanedMyWxid,
+          rawMyWxid,
+          myDisplayName: myInfo.displayName || cleanedMyWxid
+        })
+        // 对于媒体消息，不要让引用信息覆盖媒体路径
+        if (quotedReplyDisplay && !mediaItem) {
+          content = this.buildQuotedReplyText(quotedReplyDisplay)
+        }
+
+        const appendedLinkContent = quotedReplyDisplay
+          ? null
+          : this.formatLinkCardExportText(msg.content, msg.localType, 'append-url')
+        if (appendedLinkContent) {
+          content = appendedLinkContent
+        }
+
+        // 获取发送者信息用于名称显示
+        const senderWxid = msg.senderUsername
+        const contact = senderWxid
+          ? (contactCache.get(senderWxid) ?? { success: false as const })
+          : { success: false as const }
+        const senderNickname = contact.success && contact.contact?.nickName
+          ? contact.contact.nickName
+          : (senderInfo.displayName || senderWxid)
+        const senderRemark = contact.success && contact.contact?.remark ? contact.contact.remark : ''
+        const senderGroupNickname = this.resolveGroupNicknameByCandidates(groupNicknamesMap, [senderWxid])
+
+        // 使用用户偏好的显示名称
+        const senderDisplayName = this.getPreferredDisplayName(
+          senderWxid,
+          senderNickname,
+          senderRemark,
+          senderGroupNickname,
+          options.displayNamePreference || 'remark'
+        )
+        const existingSenderProfile = senderProfileMap.get(senderWxid)
+        if (!existingSenderProfile) {
+          senderProfileMap.set(senderWxid, {
+            displayName: senderDisplayName,
+            nickname: senderNickname,
+            remark: senderRemark,
+            groupNickname: senderGroupNickname
+          })
+        }
+
+        const msgObj: any = {
+          localId: allMessages.length + 1,
+          createTime: msg.createTime,
+          formattedTime: this.formatTimestamp(msg.createTime),
+          type: this.getMessageTypeName(msg.localType, msg.content),
+          localType: msg.localType,
+          content,
+          isSend: msg.isSend ? 1 : 0,
+          senderUsername: msg.senderUsername,
+          senderDisplayName,
+          source,
+          senderAvatarKey: msg.senderUsername
+        }
+
+        if (msg.localType === 47) {
+          if (msg.emojiMd5) msgObj.emojiMd5 = msg.emojiMd5
+          if (msg.emojiCdnUrl) msgObj.emojiCdnUrl = msg.emojiCdnUrl
+          if (msg.emojiCaption) msgObj.emojiCaption = msg.emojiCaption
+        }
+
+        const platformMessageId = this.getExportPlatformMessageId(msg)
+        if (platformMessageId) msgObj.platformMessageId = platformMessageId
+
+        const replyToMessageId = this.getExportReplyToMessageId(msg.content)
+        if (replyToMessageId) msgObj.replyToMessageId = replyToMessageId
+
+        const appMsgMeta = this.extractArkmeAppMessageMeta(msg.content, msg.localType)
+        if (appMsgMeta) {
+          if (
+            options.format === 'arkme-json' ||
+            (options.format === 'json' && (appMsgMeta.appMsgKind === 'quote' || appMsgMeta.appMsgKind === 'link'))
+          ) {
+            Object.assign(msgObj, appMsgMeta)
+          }
+        }
+        if (quotedReplyDisplay) {
+          if (quotedReplyDisplay.quotedSender) msgObj.quotedSender = quotedReplyDisplay.quotedSender
+          if (quotedReplyDisplay.quotedPreview) msgObj.quotedContent = quotedReplyDisplay.quotedPreview
+        }
+
+        if (options.format === 'arkme-json') {
+          const contactCardMeta = this.extractArkmeContactCardMeta(msg.content, msg.localType)
+          if (contactCardMeta) {
+            Object.assign(msgObj, contactCardMeta)
+          }
+        }
+
+        if (content && this.isTransferExportContent(content) && msg.content) {
+          transferCandidates.push({ xml: msg.content, messageRef: msgObj })
+        }
+
+        // 位置消息：附加结构化位置字段
+        if (msg.localType === 48) {
+          if (msg.locationLat != null) msgObj.locationLat = msg.locationLat
+          if (msg.locationLng != null) msgObj.locationLng = msg.locationLng
+          if (msg.locationPoiname) msgObj.locationPoiname = msg.locationPoiname
+          if (msg.locationLabel) msgObj.locationLabel = msg.locationLabel
+        }
+
+        allMessages.push(msgObj)
+        if (msg.createTime < lastCreateTime) needSort = true
+        lastCreateTime = msg.createTime
+        if ((allMessages.length % 200) === 0 || allMessages.length === totalMessages) {
+          const exportProgress = 55 + Math.floor((allMessages.length / totalMessages) * 15)
+          onProgress?.({
+            current: exportProgress,
+            total: 100,
+            currentSession: sessionInfo.displayName,
+            phase: 'exporting',
+            estimatedTotalMessages: totalMessages,
+            collectedMessages: totalMessages,
+            exportedMessages: allMessages.length
+          })
+        }
+      }
+
+      if (transferCandidates.length > 0) {
+        const transferNameCache = new Map<string, string>()
+        const transferNamePromiseCache = new Map<string, Promise<string>>()
+        const resolveDisplayNameByUsername = async (username: string): Promise<string> => {
+          if (!username) return username
+          const cachedName = transferNameCache.get(username)
+          if (cachedName) return cachedName
+          const pending = transferNamePromiseCache.get(username)
+          if (pending) return pending
+          const task = (async () => {
+            const contactResult = contactCache.get(username) ?? await getContactCached(username)
+            if (contactResult.success && contactResult.contact) {
+              return contactResult.contact.remark || contactResult.contact.nickName || contactResult.contact.alias || username
+            }
+            return username
+          })()
+          transferNamePromiseCache.set(username, task)
+          const resolved = await task
+          transferNamePromiseCache.delete(username)
+          transferNameCache.set(username, resolved)
+          return resolved
+        }
+
+        const transferConcurrency = this.getClampedConcurrency(options.exportConcurrency, 4, 8)
+        await parallelLimit(transferCandidates, transferConcurrency, async (item) => {
+          this.throwIfStopRequested(control)
+          const transferDesc = await this.resolveTransferDesc(
+            item.xml,
+            cleanedMyWxid,
+            groupNicknamesMap,
+            resolveDisplayNameByUsername
+          )
+          if (transferDesc && typeof item.messageRef.content === 'string') {
+            item.messageRef.content = this.appendTransferDesc(item.messageRef.content, transferDesc)
+          }
+        })
+      }
+
+      if (needSort) {
+        allMessages.sort((a, b) => a.createTime - b.createTime)
+      }
+
+      onProgress?.({
+        current: 70,
+        total: 100,
+        currentSession: sessionInfo.displayName,
+        phase: 'writing',
+        estimatedTotalMessages: totalMessages,
+        collectedMessages: totalMessages,
+        exportedMessages: totalMessages
+      })
+
+      // 获取会话的昵称和备注信息
+      const sessionContact = contactCache.get(sessionId) ?? await getContactCached(sessionId)
+      const sessionNickname = sessionContact.success && sessionContact.contact?.nickName
+        ? sessionContact.contact.nickName
+        : sessionInfo.displayName
+      const sessionRemark = sessionContact.success && sessionContact.contact?.remark
+        ? sessionContact.contact.remark
+        : ''
+      const sessionGroupNickname = isGroup
+        ? this.resolveGroupNicknameByCandidates(groupNicknamesMap, [sessionId])
+        : ''
+
+      // 使用用户偏好的显示名称
+      const sessionDisplayName = this.getPreferredDisplayName(
+        sessionId,
+        sessionNickname,
+        sessionRemark,
+        sessionGroupNickname,
+        options.displayNamePreference || 'remark'
+      )
+
+      const weflow = this.getWeflowHeader()
+      if (options.format === 'arkme-json' && isGroup) {
+        this.throwIfStopRequested(control)
+        await this.mergeGroupMembers(sessionId, collected.memberSet, options.exportAvatars === true)
+      }
+
+      const avatarMap = options.exportAvatars
+        ? await this.exportAvatars(
+          [
+            ...Array.from(collected.memberSet.entries()).map(([username, info]) => ({
+              username,
+              avatarUrl: info.avatarUrl
+            })),
+            { username: sessionId, avatarUrl: sessionInfo.avatarUrl },
+            { username: cleanedMyWxid, avatarUrl: myInfo.avatarUrl }
+          ]
+        )
+        : new Map<string, string>()
+
+      const sessionPayload: any = {
+        wxid: sessionId,
+        nickname: sessionNickname,
+        remark: sessionRemark,
+        displayName: sessionDisplayName,
+        type: isGroup ? '群聊' : '私聊',
+        lastTimestamp: collected.lastTime,
+        messageCount: allMessages.length,
+        avatar: avatarMap.get(sessionId)
+      }
+
+      if (options.format === 'arkme-json') {
+        const senderIdMap = new Map<string, number>()
+        const senders: Array<{
+          senderID: number
+          wxid: string
+          displayName: string
+          nickname: string
+          remark?: string
+          groupNickname?: string
+          avatar?: string
+        }> = []
+        const ensureSenderId = (senderWxidRaw: string): number => {
+          const senderWxid = String(senderWxidRaw || '').trim() || 'unknown'
+          const existed = senderIdMap.get(senderWxid)
+          if (existed) return existed
+
+          const senderID = senders.length + 1
+          senderIdMap.set(senderWxid, senderID)
+
+          const profile = senderProfileMap.get(senderWxid)
+          const senderItem: {
+            senderID: number
+            wxid: string
+            displayName: string
+            nickname: string
+            remark?: string
+            groupNickname?: string
+            avatar?: string
+          } = {
+            senderID,
+            wxid: senderWxid,
+            displayName: profile?.displayName || senderWxid,
+            nickname: profile?.nickname || profile?.displayName || senderWxid
+          }
+          if (profile?.remark) senderItem.remark = profile.remark
+          if (profile?.groupNickname) senderItem.groupNickname = profile.groupNickname
+          const avatar = avatarMap.get(senderWxid)
+          if (avatar) senderItem.avatar = avatar
+
+          senders.push(senderItem)
+          return senderID
+        }
+
+        const compactMessages = allMessages.map((message) => {
+          this.throwIfStopRequested(control)
+          const senderID = ensureSenderId(String(message.senderUsername || ''))
+          const compactMessage: any = {
+            localId: message.localId,
+            createTime: message.createTime,
+            formattedTime: message.formattedTime,
+            type: message.type,
+            localType: message.localType,
+            content: message.content,
+            isSend: message.isSend,
+            senderID,
+            source: message.source
+          }
+          if (message.platformMessageId) compactMessage.platformMessageId = message.platformMessageId
+          if (message.replyToMessageId) compactMessage.replyToMessageId = message.replyToMessageId
+          if (message.locationLat != null) compactMessage.locationLat = message.locationLat
+          if (message.locationLng != null) compactMessage.locationLng = message.locationLng
+          if (message.locationPoiname) compactMessage.locationPoiname = message.locationPoiname
+          if (message.locationLabel) compactMessage.locationLabel = message.locationLabel
+          if (message.appMsgType) compactMessage.appMsgType = message.appMsgType
+          if (message.appMsgKind) compactMessage.appMsgKind = message.appMsgKind
+          if (message.appMsgDesc) compactMessage.appMsgDesc = message.appMsgDesc
+          if (message.appMsgAppName) compactMessage.appMsgAppName = message.appMsgAppName
+          if (message.appMsgSourceName) compactMessage.appMsgSourceName = message.appMsgSourceName
+          if (message.appMsgSourceUsername) compactMessage.appMsgSourceUsername = message.appMsgSourceUsername
+          if (message.appMsgThumbUrl) compactMessage.appMsgThumbUrl = message.appMsgThumbUrl
+          if (message.quotedContent) compactMessage.quotedContent = message.quotedContent
+          if (message.quotedSender) compactMessage.quotedSender = message.quotedSender
+          if (message.quotedType) compactMessage.quotedType = message.quotedType
+          if (message.linkTitle) compactMessage.linkTitle = message.linkTitle
+          if (message.linkUrl) compactMessage.linkUrl = message.linkUrl
+          if (message.linkThumb) compactMessage.linkThumb = message.linkThumb
+          if (message.emojiMd5) compactMessage.emojiMd5 = message.emojiMd5
+          if (message.emojiCdnUrl) compactMessage.emojiCdnUrl = message.emojiCdnUrl
+          if (message.emojiCaption) compactMessage.emojiCaption = message.emojiCaption
+          if (message.finderTitle) compactMessage.finderTitle = message.finderTitle
+          if (message.finderDesc) compactMessage.finderDesc = message.finderDesc
+          if (message.finderUsername) compactMessage.finderUsername = message.finderUsername
+          if (message.finderNickname) compactMessage.finderNickname = message.finderNickname
+          if (message.finderCoverUrl) compactMessage.finderCoverUrl = message.finderCoverUrl
+          if (message.finderAvatar) compactMessage.finderAvatar = message.finderAvatar
+          if (message.finderDuration != null) compactMessage.finderDuration = message.finderDuration
+          if (message.finderObjectId) compactMessage.finderObjectId = message.finderObjectId
+          if (message.finderUrl) compactMessage.finderUrl = message.finderUrl
+          if (message.musicTitle) compactMessage.musicTitle = message.musicTitle
+          if (message.musicUrl) compactMessage.musicUrl = message.musicUrl
+          if (message.musicDataUrl) compactMessage.musicDataUrl = message.musicDataUrl
+          if (message.musicAlbumUrl) compactMessage.musicAlbumUrl = message.musicAlbumUrl
+          if (message.musicCoverUrl) compactMessage.musicCoverUrl = message.musicCoverUrl
+          if (message.musicSinger) compactMessage.musicSinger = message.musicSinger
+          if (message.musicAppName) compactMessage.musicAppName = message.musicAppName
+          if (message.musicSourceName) compactMessage.musicSourceName = message.musicSourceName
+          if (message.musicDuration != null) compactMessage.musicDuration = message.musicDuration
+          if (message.cardKind) compactMessage.cardKind = message.cardKind
+          if (message.contactCardWxid) compactMessage.contactCardWxid = message.contactCardWxid
+          if (message.contactCardNickname) compactMessage.contactCardNickname = message.contactCardNickname
+          if (message.contactCardAlias) compactMessage.contactCardAlias = message.contactCardAlias
+          if (message.contactCardRemark) compactMessage.contactCardRemark = message.contactCardRemark
+          if (message.contactCardGender != null) compactMessage.contactCardGender = message.contactCardGender
+          if (message.contactCardProvince) compactMessage.contactCardProvince = message.contactCardProvince
+          if (message.contactCardCity) compactMessage.contactCardCity = message.contactCardCity
+          if (message.contactCardSignature) compactMessage.contactCardSignature = message.contactCardSignature
+          if (message.contactCardAvatar) compactMessage.contactCardAvatar = message.contactCardAvatar
+          return compactMessage
+        })
+
+        const arkmeSession: any = {
+          ...sessionPayload
+        }
+        let groupMembers: Array<{
+          wxid: string
+          displayName: string
+          nickname: string
+          remark: string
+          alias: string
+          groupNickname?: string
+          isFriend: boolean
+          messageCount: number
+          avatar?: string
+        }> | undefined
+
+        if (isGroup) {
+          const memberUsernames = Array.from(collected.memberSet.keys()).filter(Boolean)
+          await this.preloadContacts(memberUsernames, contactCache)
+          const friendLookupUsernames = this.buildGroupNicknameIdCandidates(memberUsernames)
+          const friendFlagMap = await this.queryFriendFlagMap(friendLookupUsernames)
+          const groupStatsResult = await wcdbService.getGroupStats(sessionId, 0, 0)
+          const groupSenderCountMap = groupStatsResult.success && groupStatsResult.data
+            ? this.extractGroupSenderCountMap(groupStatsResult.data, sessionId)
+            : new Map<string, number>()
+
+          groupMembers = []
+          for (const memberWxid of memberUsernames) {
+            this.throwIfStopRequested(control)
+            const member = collected.memberSet.get(memberWxid)?.member
+            const contactResult = await getContactCached(memberWxid)
+            const contact = contactResult.success ? contactResult.contact : null
+            const nickname = String(contact?.nickName || contact?.nick_name || member?.accountName || memberWxid)
+            const remark = String(contact?.remark || '')
+            const alias = String(contact?.alias || '')
+            const groupNickname = member?.groupNickname || this.resolveGroupNicknameByCandidates(
+              groupNicknamesMap,
+              [memberWxid, contact?.username, contact?.userName, contact?.encryptUsername, contact?.encryptUserName, alias]
+            ) || ''
+            const displayName = this.getPreferredDisplayName(
+              memberWxid,
+              nickname,
+              remark,
+              groupNickname,
+              options.displayNamePreference || 'remark'
+            )
+
+            const groupMember: {
+              wxid: string
+              displayName: string
+              nickname: string
+              remark: string
+              alias: string
+              groupNickname?: string
+              isFriend: boolean
+              messageCount: number
+              avatar?: string
+            } = {
+              wxid: memberWxid,
+              displayName,
+              nickname,
+              remark,
+              alias,
+              isFriend: this.buildGroupNicknameIdCandidates([memberWxid]).some((candidate) => friendFlagMap.get(candidate) === true),
+              messageCount: this.sumSenderCountsByIdentity(groupSenderCountMap, memberWxid)
+            }
+            if (groupNickname) groupMember.groupNickname = groupNickname
+            const avatar = avatarMap.get(memberWxid)
+            if (avatar) groupMember.avatar = avatar
+            groupMembers.push(groupMember)
+          }
+          groupMembers.sort((a, b) => {
+            if (b.messageCount !== a.messageCount) return b.messageCount - a.messageCount
+            return String(a.displayName || a.wxid).localeCompare(String(b.displayName || b.wxid), 'zh-CN')
+          })
+        }
+
+        const arkmeExport: any = {
+          weflow: {
+            ...weflow,
+            format: 'arkme-json'
+          },
+          session: arkmeSession,
+          senders,
+          messages: compactMessages
+        }
+        if (groupMembers) {
+          arkmeExport.groupMembers = groupMembers
+        }
+
+        this.throwIfStopRequested(control)
+        await this.recordCreatedFileBeforeWrite(outputPath, control)
+        await fs.promises.writeFile(outputPath, JSON.stringify(arkmeExport, null, 2), 'utf-8')
+      } else {
+        const detailedExport: any = {
+          weflow,
+          session: sessionPayload,
+          messages: allMessages
+        }
+
+        if (options.exportAvatars) {
+          const avatars: Record<string, string> = {}
+          for (const [username, relPath] of avatarMap.entries()) {
+            avatars[username] = relPath
+          }
+          if (Object.keys(avatars).length > 0) {
+            detailedExport.session = {
+              ...detailedExport.session,
+              avatar: avatars[sessionId]
+            }
+            ; (detailedExport as any).avatars = avatars
+          }
+        }
+
+        this.throwIfStopRequested(control)
+        await this.recordCreatedFileBeforeWrite(outputPath, control)
+        await fs.promises.writeFile(outputPath, JSON.stringify(detailedExport, null, 2), 'utf-8')
+      }
+
+      onProgress?.({
+        current: 100,
+        total: 100,
+        currentSession: sessionInfo.displayName,
+        phase: 'complete',
+        estimatedTotalMessages: totalMessages,
+        collectedMessages: totalMessages,
+        exportedMessages: totalMessages,
+        writtenFiles: 1
+      })
+
+      return { success: true }
+    } catch (e) {
+      if (this.isStopError(e)) {
+        return { success: false, error: '导出任务已停止' }
+      }
+      if (this.isPauseError(e)) {
+        return { success: false, error: '导出任务已暂停' }
+      }
+      return { success: false, error: String(e) }
+    }
+  }
+
+  /**
+   * 导出单个会话为 Excel 格式（参考 echotrace 格式）
+   */
+  async exportSessionToExcel(
+    sessionId: string,
+    outputPath: string,
+    options: ExportOptions,
+    onProgress?: (progress: ExportProgress) => void,
+    control?: ExportTaskControl
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      this.throwIfStopRequested(control)
+      const conn = await this.ensureConnected()
+      if (!conn.success || !conn.cleanedWxid) return { success: false, error: conn.error }
+
+      const cleanedMyWxid = conn.cleanedWxid
+      const isGroup = sessionId.includes('@chatroom')
+      const rawMyWxid = this.getConfiguredMyWxid()
+
+      const sessionInfo = await this.getContactInfo(sessionId)
+      const myInfo = await this.getContactInfo(cleanedMyWxid)
+
+      const contactCache = new Map<string, { success: boolean; contact?: any; error?: string }>()
+      const getContactCached = async (username: string) => {
+        if (contactCache.has(username)) {
+          return contactCache.get(username)!
+        }
+        const result = await wcdbService.getContact(username)
+        contactCache.set(username, result)
+        return result
+      }
+
+      // 获取会话的备注信息
+      const sessionContact = await getContactCached(sessionId)
+      const sessionRemark = sessionContact.success && sessionContact.contact?.remark ? sessionContact.contact.remark : ''
+      const sessionNickname = sessionContact.success && sessionContact.contact?.nickName ? sessionContact.contact.nickName : sessionId
+
+      onProgress?.({
+        current: 0,
+        total: 100,
+        currentSession: sessionInfo.displayName,
+        phase: 'preparing'
+      })
+
+      const collectParams = this.resolveCollectParams(options)
+      const collectProgressReporter = this.createCollectProgressReporter(sessionInfo.displayName, onProgress, 5)
+      const collected = await this.collectMessages(
+        sessionId,
+        cleanedMyWxid,
+        options.dateRange,
+        options.senderUsername,
+        collectParams.mode,
+        collectParams.targetMediaTypes,
+        control,
+        collectProgressReporter
+      )
+      const totalMessages = collected.rows.length
+
+      // 如果没有消息,不创建文件
+      if (totalMessages === 0) {
+        return { success: false, error: await this.buildNoMessagesError(sessionId, collected) }
+      }
+
+      await this.hydrateEmojiCaptionsForMessages(sessionId, collected.rows, control)
+
+      // 解析引用消息
+      await this.resolveQuotedMessagesForExport(collected.rows, sessionId)
+
+      const voiceMessages = options.exportVoiceAsText
+        ? collected.rows.filter(msg => msg.localType === 34)
+        : []
+
+      if (options.exportVoiceAsText && voiceMessages.length > 0) {
+        await this.ensureVoiceModel(onProgress)
+      }
+
+      const senderUsernames = new Set<string>()
+      let senderScanIndex = 0
+      for (const msg of collected.rows) {
+        if ((senderScanIndex++ & 0x7f) === 0) {
+          this.throwIfStopRequested(control)
+        }
+        if (msg.senderUsername) senderUsernames.add(msg.senderUsername)
+      }
+      senderUsernames.add(sessionId)
+      await this.preloadContacts(senderUsernames, contactCache)
+
+      onProgress?.({
+        current: 30,
+        total: 100,
+        currentSession: sessionInfo.displayName,
+        phase: 'exporting',
+        estimatedTotalMessages: totalMessages,
+        collectedMessages: totalMessages,
+        exportedMessages: 0
+      })
+
+      // 创建 Excel 工作簿
+      const workbook = new ExcelJS.Workbook()
+      workbook.creator = 'WeFlow'
+      workbook.created = new Date()
+
+      const worksheet = workbook.addWorksheet('聊天记录')
+
+      let currentRow = 1
+
+      const useCompactColumns = options.excelCompactColumns === true
+
+      // 第一行：会话信息标题
+      const titleCell = worksheet.getCell(currentRow, 1)
+      titleCell.value = '会话信息'
+      titleCell.font = { name: 'Calibri', bold: true, size: 11 }
+      titleCell.alignment = { vertical: 'middle', horizontal: 'left' }
+      worksheet.getRow(currentRow).height = 25
+      currentRow++
+
+      // 第二行：会话详细信息
+      worksheet.getCell(currentRow, 1).value = '微信ID'
+      worksheet.getCell(currentRow, 1).font = { name: 'Calibri', bold: true, size: 11 }
+      worksheet.mergeCells(currentRow, 2, currentRow, 3)
+      worksheet.getCell(currentRow, 2).value = sessionId
+      worksheet.getCell(currentRow, 2).font = { name: 'Calibri', size: 11 }
+
+      worksheet.getCell(currentRow, 4).value = '昵称'
+      worksheet.getCell(currentRow, 4).font = { name: 'Calibri', bold: true, size: 11 }
+      worksheet.getCell(currentRow, 5).value = sessionNickname
+      worksheet.getCell(currentRow, 5).font = { name: 'Calibri', size: 11 }
+
+      if (isGroup) {
+        worksheet.getCell(currentRow, 6).value = '备注'
+        worksheet.getCell(currentRow, 6).font = { name: 'Calibri', bold: true, size: 11 }
+        worksheet.mergeCells(currentRow, 7, currentRow, 8)
+        worksheet.getCell(currentRow, 7).value = sessionRemark
+        worksheet.getCell(currentRow, 7).font = { name: 'Calibri', size: 11 }
+      }
+      worksheet.getRow(currentRow).height = 20
+      currentRow++
+
+      // 第三行：导出元数据
+      const { chatlab, meta: exportMeta } = this.getExportMeta(sessionId, sessionInfo, isGroup)
+      worksheet.getCell(currentRow, 1).value = '导出工具'
+      worksheet.getCell(currentRow, 1).font = { name: 'Calibri', bold: true, size: 11 }
+      worksheet.getCell(currentRow, 2).value = chatlab.generator
+      worksheet.getCell(currentRow, 2).font = { name: 'Calibri', size: 10 }
+
+      worksheet.getCell(currentRow, 3).value = '导出版本'
+      worksheet.getCell(currentRow, 3).font = { name: 'Calibri', bold: true, size: 11 }
+      worksheet.getCell(currentRow, 4).value = chatlab.version
+      worksheet.getCell(currentRow, 4).font = { name: 'Calibri', size: 10 }
+
+      worksheet.getCell(currentRow, 5).value = '平台'
+      worksheet.getCell(currentRow, 5).font = { name: 'Calibri', bold: true, size: 11 }
+      worksheet.getCell(currentRow, 6).value = exportMeta.platform
+      worksheet.getCell(currentRow, 6).font = { name: 'Calibri', size: 10 }
+
+      worksheet.getCell(currentRow, 7).value = '导出时间'
+      worksheet.getCell(currentRow, 7).font = { name: 'Calibri', bold: true, size: 11 }
+      worksheet.getCell(currentRow, 8).value = this.formatTimestamp(chatlab.exportedAt)
+      worksheet.getCell(currentRow, 8).font = { name: 'Calibri', size: 10 }
+
+      worksheet.getRow(currentRow).height = 20
+      currentRow++
+
+      // 表头行
+      const includeGroupNicknameColumn = !useCompactColumns && isGroup
+      const headers = useCompactColumns
+        ? ['序号', '时间', '发送者身份', '消息类型', '内容']
+        : includeGroupNicknameColumn
+          ? ['序号', '时间', '发送者昵称', '发送者微信ID', '发送者备注', '群昵称', '发送者身份', '消息类型', '内容']
+          : ['序号', '时间', '发送者昵称', '发送者微信ID', '发送者备注', '发送者身份', '消息类型', '内容']
+      const headerRow = worksheet.getRow(currentRow)
+      headerRow.height = 22
+
+      headers.forEach((header, index) => {
+        const cell = headerRow.getCell(index + 1)
+        cell.value = header
+        cell.font = { name: 'Calibri', bold: true, size: 11 }
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFE8F5E9' }
+        }
+        cell.alignment = { vertical: 'middle', horizontal: 'center' }
+      })
+      currentRow++
+
+      // 设置列宽
+      worksheet.getColumn(1).width = 8   // 序号
+      worksheet.getColumn(2).width = 20  // 时间
+      if (useCompactColumns) {
+        worksheet.getColumn(3).width = 18  // 发送者身份
+        worksheet.getColumn(4).width = 12  // 消息类型
+        worksheet.getColumn(5).width = 50  // 内容
+      } else {
+        worksheet.getColumn(3).width = 18  // 发送者昵称
+        worksheet.getColumn(4).width = 25  // 发送者微信ID
+        worksheet.getColumn(5).width = 18  // 发送者备注
+        if (includeGroupNicknameColumn) {
+          worksheet.getColumn(6).width = 18  // 群昵称
+          worksheet.getColumn(7).width = 15  // 发送者身份
+          worksheet.getColumn(8).width = 12  // 消息类型
+          worksheet.getColumn(9).width = 50  // 内容
+        } else {
+          worksheet.getColumn(6).width = 15  // 发送者身份
+          worksheet.getColumn(7).width = 12  // 消息类型
+          worksheet.getColumn(8).width = 50  // 内容
+        }
+      }
+
+      // 预加载群昵称 (仅群聊且完整列模式)
+      const groupNicknameCandidates = isGroup
+        ? this.buildGroupNicknameIdCandidates([
+          ...collected.rows.map(msg => msg.senderUsername),
+          cleanedMyWxid,
+          rawMyWxid
+        ])
+        : []
+      const groupNicknamesMap = isGroup
+        ? await this.getGroupNicknamesForRoom(sessionId, groupNicknameCandidates)
+        : new Map<string, string>()
+
+
+      // 填充数据
+      const sortedMessages = collected.rows
+
+      // 媒体导出设置
+      const { exportMediaEnabled, mediaRootDir, mediaRelativePrefix } = this.getMediaLayout(outputPath, options)
+
+      // ========== 并行预处理：媒体文件 ==========
+      const mediaMessages = this.collectMediaMessagesForExport(sortedMessages, options)
+
+      const mediaCache = new Map<string, MediaExportItem | null>()
+      const mediaDirCache = new Set<string>()
+      const beforeMediaDoneFiles = this.getMediaDoneFilesCount()
+
+      if (mediaMessages.length > 0) {
+        await this.preloadMediaLookupCaches(sessionId, mediaMessages, {
+          exportImages: options.exportImages,
+          exportVideos: options.exportVideos
+        }, control)
+        const voiceMediaMessages = mediaMessages.filter(msg => msg.localType === 34)
+        if (voiceMediaMessages.length > 0) {
+          await this.preloadVoiceWavCache(sessionId, voiceMediaMessages, control)
+        }
+
+        onProgress?.({
+          current: 35,
+          total: 100,
+          currentSession: sessionInfo.displayName,
+          phase: 'exporting-media',
+          phaseProgress: 0,
+          phaseTotal: mediaMessages.length,
+          phaseLabel: this.formatMediaPhaseLabel(0, mediaMessages.length, beforeMediaDoneFiles),
+          ...this.getMediaTelemetrySnapshot(),
+          estimatedTotalMessages: totalMessages
+        })
+
+        const mediaConcurrency = this.getClampedConcurrency(options.exportConcurrency)
+        let mediaExported = 0
+        await parallelLimit(mediaMessages, mediaConcurrency, async (msg) => {
+          this.throwIfStopRequested(control)
+          const mediaKey = this.getMediaCacheKey(msg)
+          if (!mediaCache.has(mediaKey)) {
+            const mediaItem = await this.exportMediaForMessage(msg, sessionId, mediaRootDir, mediaRelativePrefix, {
+              exportImages: options.exportImages,
+              exportVoices: options.exportVoices,
+              exportVideos: options.exportVideos,
+              exportEmojis: options.exportEmojis,
+              exportFiles: options.exportFiles,
+              maxFileSizeMb: options.maxFileSizeMb,
+              exportVoiceAsText: options.exportVoiceAsText,
+              includeVideoPoster: options.format === 'html',
+              dirCache: mediaDirCache,
+              control
+            })
+            mediaCache.set(mediaKey, mediaItem)
+          }
+          mediaExported++
+          if (mediaExported % 5 === 0 || mediaExported === mediaMessages.length) {
+            onProgress?.({
+              current: 35,
+              total: 100,
+              currentSession: sessionInfo.displayName,
+              phase: 'exporting-media',
+              phaseProgress: mediaExported,
+              phaseTotal: mediaMessages.length,
+              phaseLabel: this.formatMediaPhaseLabel(mediaExported, mediaMessages.length, beforeMediaDoneFiles),
+              ...this.getMediaTelemetrySnapshot()
+            })
+          }
+        })
+      }
+      const fileOnlyExportFailure = this.buildFileOnlyExportFailure(options, mediaMessages, beforeMediaDoneFiles)
+      if (fileOnlyExportFailure) return fileOnlyExportFailure
+
+      // ========== 并行预处理：语音转文字 ==========
+      const voiceTranscriptMap = new Map<string, string>()
+
+      if (voiceMessages.length > 0) {
+        await this.preloadVoiceWavCache(sessionId, voiceMessages, control)
+
+        onProgress?.({
+          current: 50,
+          total: 100,
+          currentSession: sessionInfo.displayName,
+          phase: 'exporting-voice',
+          phaseProgress: 0,
+          phaseTotal: voiceMessages.length,
+          phaseLabel: `语音转文字 0/${voiceMessages.length}`,
+          estimatedTotalMessages: totalMessages
+        })
+
+        const VOICE_CONCURRENCY = 4
+        let voiceTranscribed = 0
+        await parallelLimit(voiceMessages, VOICE_CONCURRENCY, async (msg) => {
+          this.throwIfStopRequested(control)
+          const transcript = await this.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername)
+          voiceTranscriptMap.set(this.getStableMessageKey(msg), transcript)
+          voiceTranscribed++
+          onProgress?.({
+            current: 50,
+            total: 100,
+            currentSession: sessionInfo.displayName,
+            phase: 'exporting-voice',
+            phaseProgress: voiceTranscribed,
+            phaseTotal: voiceMessages.length,
+            phaseLabel: `语音转文字 ${voiceTranscribed}/${voiceMessages.length}`
+          })
+        })
+      }
+
+      const shouldUseStreamingWriter = totalMessages > 20000
+      if (shouldUseStreamingWriter) {
+        return this.exportSessionToExcelStreaming({
+          outputPath,
+          options,
+          sessionId,
+          sessionInfo,
+          myInfo,
+          cleanedMyWxid,
+          rawMyWxid,
+          isGroup,
+          sortedMessages,
+          mediaCache,
+          voiceTranscriptMap,
+          getContactCached,
+          groupNicknamesMap,
+          onProgress,
+          control,
+          totalMessages
+        })
+      }
+
+      onProgress?.({
+        current: 65,
+        total: 100,
+        currentSession: sessionInfo.displayName,
+        phase: 'exporting',
+        estimatedTotalMessages: totalMessages,
+        collectedMessages: totalMessages,
+        exportedMessages: 0
+      })
+
+      // ========== 写入 Excel 行 ==========
+      const senderProfileCache = new Map<string, ExportDisplayProfile>()
+      for (let i = 0; i < totalMessages; i++) {
+        if ((i & 0x7f) === 0) {
+          this.throwIfStopRequested(control)
+        }
+        const msg = sortedMessages[i]
+
+        // 确定发送者信息
+        let senderRole: string
+        let senderWxid: string
+        let senderNickname: string
+        let senderRemark: string = ''
+        let senderGroupNickname: string = ''  // 群昵称
+
+        if (isGroup) {
+          const senderProfileKey = `${msg.isSend ? cleanedMyWxid : (msg.senderUsername || cleanedMyWxid)}::${msg.isSend ? '1' : '0'}`
+          let senderProfile = senderProfileCache.get(senderProfileKey)
+          if (!senderProfile) {
+            senderProfile = await this.resolveExportDisplayProfile(
+              msg.isSend ? cleanedMyWxid : (msg.senderUsername || cleanedMyWxid),
+              options.displayNamePreference,
+              getContactCached,
+              groupNicknamesMap,
+              msg.isSend ? (myInfo.displayName || cleanedMyWxid) : (msg.senderUsername || ''),
+              msg.isSend ? [rawMyWxid, cleanedMyWxid] : []
+            )
+            senderProfileCache.set(senderProfileKey, senderProfile)
+          }
+          senderWxid = senderProfile.wxid
+          senderNickname = senderProfile.nickname
+          senderRemark = senderProfile.remark
+          senderGroupNickname = senderProfile.groupNickname
+          senderRole = senderProfile.displayName
+        } else if (msg.isSend) {
+          // 我发送的消息
+          senderRole = '我'
+          senderWxid = cleanedMyWxid
+          senderNickname = myInfo.displayName || cleanedMyWxid
+          senderRemark = ''
+        } else {
+          // 单聊对方消息 - 用 getContact 获取联系人详情
+          senderWxid = sessionId
+          const contactDetail = await getContactCached(sessionId)
+          if (contactDetail.success && contactDetail.contact) {
+            senderNickname = contactDetail.contact.nickName || sessionId
+            senderRemark = contactDetail.contact.remark || ''
+            senderRole = senderRemark || senderNickname
+          } else {
+            senderNickname = sessionInfo.displayName || sessionId
+            senderRemark = ''
+            senderRole = senderNickname
+          }
+        }
+
+        const row = worksheet.getRow(currentRow)
+        row.height = 24
+
+        const mediaKey = this.getMediaCacheKey(msg)
+        const mediaItem = mediaCache.get(mediaKey)
+        const shouldUseTranscript = msg.localType === 34 && options.exportVoiceAsText
+        const contentValue = shouldUseTranscript
+          ? this.formatPlainExportContent(
+            msg.content,
+            msg.localType,
+            options,
+            voiceTranscriptMap.get(this.getStableMessageKey(msg)),
+            cleanedMyWxid,
+            msg.senderUsername,
+            msg.isSend,
+            msg.emojiCaption
+          )
+          : ((msg.localType !== 47 ? mediaItem?.relativePath : undefined)
+            || this.formatPlainExportContent(
+              msg.content,
+              msg.localType,
+              options,
+              voiceTranscriptMap.get(this.getStableMessageKey(msg)),
+              cleanedMyWxid,
+              msg.senderUsername,
+              msg.isSend,
+              msg.emojiCaption
+            ))
+
+        // 转账消息：追加 "谁转账给谁" 信息
+        let enrichedContentValue = contentValue
+        if (this.isTransferExportContent(contentValue) && msg.content) {
+          const transferDesc = await this.resolveTransferDesc(
+            msg.content,
+            cleanedMyWxid,
+            groupNicknamesMap,
+            async (username) => {
+              const c = await getContactCached(username)
+              if (c.success && c.contact) {
+                return c.contact.remark || c.contact.nickName || c.contact.alias || username
+              }
+              return username
+            }
+          )
+          if (transferDesc) {
+            enrichedContentValue = this.appendTransferDesc(contentValue, transferDesc)
+          }
+        }
+
+        const quotedReplyDisplay = await this.resolveQuotedReplyDisplayWithNames({
+          content: msg.content,
+          isGroup,
+          displayNamePreference: options.displayNamePreference,
+          getContact: getContactCached,
+          groupNicknamesMap,
+          cleanedMyWxid,
+          rawMyWxid,
+          myDisplayName: myInfo.displayName || cleanedMyWxid
+        })
+        if (quotedReplyDisplay) {
+          enrichedContentValue = this.buildQuotedReplyText(quotedReplyDisplay)
+        }
+
+        const contentCellIndex = useCompactColumns ? 5 : (includeGroupNicknameColumn ? 9 : 8)
+        const contentCell = worksheet.getCell(currentRow, contentCellIndex)
+
+        worksheet.getCell(currentRow, 1).value = i + 1
+        worksheet.getCell(currentRow, 2).value = this.formatTimestamp(msg.createTime)
+        if (useCompactColumns) {
+          worksheet.getCell(currentRow, 3).value = senderRole
+          worksheet.getCell(currentRow, 4).value = this.getMessageTypeName(msg.localType, msg.content)
+        } else if (includeGroupNicknameColumn) {
+          worksheet.getCell(currentRow, 3).value = senderNickname
+          worksheet.getCell(currentRow, 4).value = senderWxid
+          worksheet.getCell(currentRow, 5).value = senderRemark
+          worksheet.getCell(currentRow, 6).value = senderGroupNickname
+          worksheet.getCell(currentRow, 7).value = senderRole
+          worksheet.getCell(currentRow, 8).value = this.getMessageTypeName(msg.localType, msg.content)
+        } else {
+          worksheet.getCell(currentRow, 3).value = senderNickname
+          worksheet.getCell(currentRow, 4).value = senderWxid
+          worksheet.getCell(currentRow, 5).value = senderRemark
+          worksheet.getCell(currentRow, 6).value = senderRole
+          worksheet.getCell(currentRow, 7).value = this.getMessageTypeName(msg.localType, msg.content)
+        }
+        contentCell.value = enrichedContentValue
+        if (!quotedReplyDisplay) {
+          this.applyExcelLinkCardCell(contentCell, msg.content, msg.localType)
+        }
+
+        currentRow++
+
+        // 每处理 100 条消息报告一次进度
+        if ((i + 1) % 100 === 0) {
+          const progress = 30 + Math.floor((i + 1) / sortedMessages.length * 50)
+          onProgress?.({
+            current: progress,
+            total: 100,
+            currentSession: sessionInfo.displayName,
+            phase: 'exporting',
+            estimatedTotalMessages: totalMessages,
+            collectedMessages: totalMessages,
+            exportedMessages: i + 1
+          })
+        }
+      }
+
+      onProgress?.({
+        current: 90,
+        total: 100,
+        currentSession: sessionInfo.displayName,
+        phase: 'writing',
+        estimatedTotalMessages: totalMessages,
+        collectedMessages: totalMessages,
+        exportedMessages: totalMessages
+      })
+
+      // 写入文件
+      this.throwIfStopRequested(control)
+      await this.recordCreatedFileBeforeWrite(outputPath, control)
+      await workbook.xlsx.writeFile(outputPath)
+
+      onProgress?.({
+        current: 100,
+        total: 100,
+        currentSession: sessionInfo.displayName,
+        phase: 'complete',
+        estimatedTotalMessages: totalMessages,
+        collectedMessages: totalMessages,
+        exportedMessages: totalMessages,
+        writtenFiles: 1
+      })
+
+      return { success: true }
+    } catch (e) {
+      if (this.isStopError(e)) {
+        return { success: false, error: '导出任务已停止' }
+      }
+      if (this.isPauseError(e)) {
+        return { success: false, error: '导出任务已暂停' }
+      }
+      // 处理文件被占用的错误
+      if (e instanceof Error) {
+        if (e.message.includes('EBUSY') || e.message.includes('resource busy') || e.message.includes('locked')) {
+          return { success: false, error: '文件已经打开，请关闭后再导出' }
+        }
+      }
+
+      return { success: false, error: String(e) }
     }
   }
 

@@ -1,3 +1,4 @@
+import { createRequire } from 'module'
 import { join } from 'path'
 import { existsSync, statSync } from 'fs'
 import * as path from 'path'
@@ -321,7 +322,7 @@ class ChatService {
     }
   }
 
-  setRuntimeConfig(config: { dbPath?: string; decryptKey?: string; myWxid?: string }): void {
+  setRuntimeConfig(config: { dbPath?: string; decryptKey?: string; myWxid?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean }): void {
     this.runtimeConfig = config
   }
 
@@ -1039,7 +1040,7 @@ class ChatService {
   /**
    * HTTP API 复用消息解析逻辑，确保和应用内展示一致。
    */
-  
+
   mapRowsToMessagesLiteForApi(rows: Record<string, any>[]): Message[] {
     const myWxid = String(this.configService.getMyWxidCleaned() || '').trim()
     return mapRowsToMessagesLite(rows, myWxid)
@@ -1217,6 +1218,13 @@ class ChatService {
   ): Promise<{ success: boolean; hasCache: boolean; data?: string }> {
     return this.mediaAssetsService.resolveVoiceCache(sessionId, msgId)
   }
+      // 在 worker 环境中使用 createRequire 来正确加载模块
+      const requireFromApp = createRequire(join(appPath, 'package.json'))
+      const silkWasm = requireFromApp('silk-wasm')
+      if (!silkWasm || !silkWasm.decode) {
+        console.error('[ChatService][Voice] silk-wasm module invalid')
+        return null
+      }
 
   async getVoiceData_Legacy(
     sessionId: string,

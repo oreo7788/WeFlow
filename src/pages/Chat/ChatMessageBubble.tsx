@@ -25,6 +25,7 @@ export interface ChatMessageBubbleProps {
   isSelected?: boolean
   onContextMenu?: (event: React.MouseEvent, message: Message) => void
   onToggleSelection?: (messageKey: string, isShiftKey?: boolean) => void
+  actionNode?: React.ReactNode
   children: React.ReactNode
   portal?: React.ReactNode
 }
@@ -58,6 +59,7 @@ function ChatMessageBubble({
   isSelected,
   onContextMenu,
   onToggleSelection,
+  actionNode,
   children,
   portal
 }: ChatMessageBubbleProps) {
@@ -93,14 +95,22 @@ function ChatMessageBubble({
           </div>
           <div className="bubble-body">
             {isGroupChat && !isSent && (
-              <div className="sender-name">
-                {resolvedSenderName || '群成员'}
+              <div className="sender-line">
+                <div className="sender-name">
+                  {resolvedSenderName || '群成员'}
+                </div>
+                {actionNode}
               </div>
             )}
             <ErrorBoundary fallback={<div className="message-render-error">消息渲染出错</div>}>
               {children}
             </ErrorBoundary>
           </div>
+          {!isGroupChat && !isSent && actionNode ? (
+            <div className="message-action-inline">
+              {actionNode}
+            </div>
+          ) : null}
         </div>
 
         {isSelectionMode && isSent && <SelectionCheckbox checked={isSelected} side="right" />}
@@ -134,6 +144,7 @@ function areEqual(prev: ChatMessageBubbleProps, next: ChatMessageBubbleProps) {
     prev.isSelected === next.isSelected &&
     prev.onContextMenu === next.onContextMenu &&
     prev.onToggleSelection === next.onToggleSelection &&
+    prev.actionNode === next.actionNode &&
     prev.children === next.children &&
     prev.portal === next.portal
   )

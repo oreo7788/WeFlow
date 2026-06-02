@@ -36,8 +36,20 @@ function AnalyticsPage() {
   const [excludedUsernames, setExcludedUsernames] = useState<Set<string>>(new Set())
   const [draftExcluded, setDraftExcluded] = useState<Set<string>>(new Set())
 
-  const themeMode = useThemeStore((state) => state.themeMode)
-  const { statistics, rankings, timeDistribution, isLoaded, setStatistics, setRankings, setTimeDistribution, markLoaded, clearCache } = useAnalyticsStore()
+  const chartThemeSignature = useThemeStore((state) => `${state.currentTheme}-${state.themeMode}`)
+  const {
+    statistics,
+    rankings,
+    timeDistribution,
+    selfSentDailyDistribution,
+    isLoaded,
+    setStatistics,
+    setRankings,
+    setTimeDistribution,
+    setSelfSentDailyDistribution,
+    markLoaded,
+    clearCache
+  } = useAnalyticsStore()
 
   const loadExcludedUsernames = useCallback(async () => {
     try {
@@ -54,7 +66,14 @@ function AnalyticsPage() {
   }, [])
 
   const loadData = useCallback(async (forceRefresh = false) => {
-    if (isLoaded && !forceRefresh) return
+    const currentAnalyticsState = useAnalyticsStore.getState()
+    if (
+      currentAnalyticsState.isLoaded &&
+      !forceRefresh &&
+      currentAnalyticsState.statistics &&
+      currentAnalyticsState.timeDistribution &&
+      currentAnalyticsState.selfSentDailyDistribution
+    ) return
     const taskId = registerBackgroundTask({
       sourcePage: 'analytics',
       title: forceRefresh ? '刷新分析看板' : '加载分析看板',
@@ -128,6 +147,22 @@ function AnalyticsPage() {
       if (timeResult.success && timeResult.data) {
         setTimeDistribution(timeResult.data)
       }
+      setLoadingStatus('正在统计每日发送分布...')
+      updateBackgroundTask(taskId, {
+        detail: '正在统计每日发送分布',
+        progressText: '每日发送'
+      })
+      const selfSentDailyResult = await window.electronAPI.analytics.getSelfSentDailyDistribution(0, 0, forceRefresh)
+      if (isBackgroundTaskCancelRequested(taskId)) {
+        finishBackgroundTask(taskId, 'canceled', {
+          detail: '已停止后续加载，每日发送分布结果未继续写入'
+        })
+        setIsLoading(false)
+        return
+      }
+      if (selfSentDailyResult.success && selfSentDailyResult.data) {
+        setSelfSentDailyDistribution(selfSentDailyResult.data)
+      }
       markLoaded()
       finishBackgroundTask(taskId, 'completed', {
         detail: '分析看板数据加载完成',
@@ -142,7 +177,7 @@ function AnalyticsPage() {
       setIsLoading(false)
       if (removeListener) removeListener()
     }
-  }, [isLoaded, markLoaded, setRankings, setStatistics, setTimeDistribution])
+  }, [markLoaded, setRankings, setSelfSentDailyDistribution, setStatistics, setTimeDistribution])
 
   const location = useLocation()
 
@@ -276,17 +311,42 @@ function AnalyticsPage() {
     return num.toLocaleString()
   }
 
-  const getChartLabelColors = () => {
+  const getChartTheme = () => {
     if (typeof window === 'undefined') {
-      return { text: '#333333', line: '#999999' }
+      return {
+        text: '#333333',
+        secondaryText: '#666666',
+        mutedText: '#999999',
+        line: '#e5e5e5',
+        surface: '#ffffff',
+        border: '#e5e5e5',
+        primary: '#10a37f',
+        primaryLight: 'rgba(16, 163, 127, 0.1)',
+        danger: '#ef4444',
+        warning: '#f59e0b',
+        success: '#10a37f',
+        info: '#3b82f6'
+      }
     }
     const styles = getComputedStyle(document.documentElement)
-    const text = styles.getPropertyValue('--text-primary').trim() || '#333333'
-    const line = styles.getPropertyValue('--text-tertiary').trim() || '#999999'
-    return { text, line }
+    const cssVar = (name: string, fallback: string) => styles.getPropertyValue(name).trim() || fallback
+    return {
+      text: cssVar('--text-primary', '#333333'),
+      secondaryText: cssVar('--text-secondary', '#666666'),
+      mutedText: cssVar('--text-tertiary', '#999999'),
+      line: cssVar('--border-color', '#e5e5e5'),
+      surface: cssVar('--card-inner-bg', '#ffffff'),
+      border: cssVar('--border-color', '#e5e5e5'),
+      primary: cssVar('--primary', '#10a37f'),
+      primaryLight: cssVar('--primary-light', 'rgba(16, 163, 127, 0.1)'),
+      danger: cssVar('--danger', '#ef4444'),
+      warning: cssVar('--warning', '#f59e0b'),
+      success: cssVar('--primary', '#10a37f'),
+      info: '#3b82f6'
+    }
   }
 
-  const chartLabelColors = getChartLabelColors()
+  const chartTheme = getChartTheme()
 
   const getTypeChartOption = () => {
     if (!statistics) return {}
@@ -309,7 +369,7 @@ function AnalyticsPage() {
           show: true,
           formatter: '{b}\n{d}%',
           textStyle: {
-            color: chartLabelColors.text,
+            color: chartTheme.text,
             textShadowBlur: 0,
             textShadowColor: 'transparent',
             textShadowOffsetX: 0,
@@ -320,7 +380,7 @@ function AnalyticsPage() {
         },
         labelLine: {
           lineStyle: {
-            color: chartLabelColors.line,
+            color: chartTheme.mutedText,
             shadowBlur: 0,
             shadowColor: 'transparent',
           },
@@ -332,7 +392,7 @@ function AnalyticsPage() {
             shadowOffsetY: 0,
           },
           label: {
-            color: chartLabelColors.text,
+            color: chartTheme.text,
             textShadowBlur: 0,
             textShadowColor: 'transparent',
             textBorderWidth: 0,
@@ -340,7 +400,7 @@ function AnalyticsPage() {
           },
           labelLine: {
             lineStyle: {
-              color: chartLabelColors.line,
+              color: chartTheme.mutedText,
               shadowBlur: 0,
               shadowColor: 'transparent',
             },
@@ -364,7 +424,7 @@ function AnalyticsPage() {
           show: true,
           formatter: '{b}: {c}',
           textStyle: {
-            color: chartLabelColors.text,
+            color: chartTheme.text,
             textShadowBlur: 0,
             textShadowColor: 'transparent',
             textShadowOffsetX: 0,
@@ -375,7 +435,7 @@ function AnalyticsPage() {
         },
         labelLine: {
           lineStyle: {
-            color: chartLabelColors.line,
+            color: chartTheme.mutedText,
             shadowBlur: 0,
             shadowColor: 'transparent',
           },
@@ -387,7 +447,7 @@ function AnalyticsPage() {
             shadowOffsetY: 0,
           },
           label: {
-            color: chartLabelColors.text,
+            color: chartTheme.text,
             textShadowBlur: 0,
             textShadowColor: 'transparent',
             textBorderWidth: 0,
@@ -395,7 +455,7 @@ function AnalyticsPage() {
           },
           labelLine: {
             lineStyle: {
-              color: chartLabelColors.line,
+              color: chartTheme.mutedText,
               shadowBlur: 0,
               shadowColor: 'transparent',
             },
@@ -416,6 +476,160 @@ function AnalyticsPage() {
       series: [{ type: 'bar', data, itemStyle: { color: '#07c160', borderRadius: [4, 4, 0, 0] } }]
     }
   }
+
+  const getSelfSentDailyRatioData = () => {
+    const entries = Object.entries(selfSentDailyDistribution?.dailyDistribution || {})
+      .sort(([a], [b]) => a.localeCompare(b))
+    const days = entries.map(([day]) => day)
+    const counts = entries.map(([, count]) => count)
+    const totalDays = Math.max(days.length, 1)
+    const total = counts.reduce((sum, count) => sum + count, 0)
+    const baseline = total > 0 ? total / totalDays : 0
+    const ratios = counts.map((count) => baseline > 0 ? Number((count / baseline * 100).toFixed(1)) : 0)
+    const movingAverage = ratios.map((_, index) => {
+      const start = Math.max(0, index - 6)
+      const windowValues = ratios.slice(start, index + 1)
+      const sum = windowValues.reduce((total, value) => total + value, 0)
+      return Number((sum / windowValues.length).toFixed(1))
+    })
+    return { days, counts, ratios, movingAverage, baseline, total }
+  }
+
+  const getSelfSentDailyRatioOption = () => {
+    if (!selfSentDailyDistribution) return {}
+    const { days, counts, ratios, movingAverage, baseline } = getSelfSentDailyRatioData()
+    const showZoom = days.length > 31
+
+    const zoomStart = showZoom ? Math.max(0, 100 - Math.min(100, 31 / days.length * 100)) : 0
+    const ratioBarColors = {
+      normal: chartTheme.primary,
+      high: chartTheme.warning,
+      spike: chartTheme.danger,
+      trend: chartTheme.secondaryText,
+      baseline: chartTheme.mutedText
+    }
+
+    return {
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: chartTheme.surface,
+        borderColor: chartTheme.border,
+        textStyle: { color: chartTheme.text },
+        extraCssText: 'box-shadow: var(--shadow-md); border-radius: 8px;',
+        axisPointer: {
+          type: 'shadow',
+          shadowStyle: { color: chartTheme.primaryLight }
+        },
+        formatter: (params: any) => {
+          const items = Array.isArray(params) ? params : [params]
+          const first = items[0]
+          const index = Number(first?.dataIndex || 0)
+          const lines = [
+            `${first?.axisValue || ''}`,
+            `当日发送：${formatNumber(counts[index] || 0)} 条`,
+            `相对日均：${formatNumber(ratios[index] || 0)}%`,
+            `7日均线：${formatNumber(movingAverage[index] || 0)}%`,
+            `全期日均：${baseline.toFixed(1)} 条/天`
+          ]
+          return lines.join('<br/>')
+        }
+      },
+      legend: {
+        data: ['单日比例', '7日均线'],
+        top: 0,
+        textStyle: { color: chartTheme.secondaryText }
+      },
+      grid: { left: 56, right: 40, top: 42, bottom: showZoom ? 58 : 32 },
+      xAxis: {
+        type: 'category',
+        data: days,
+        axisLine: { lineStyle: { color: chartTheme.line } },
+        axisTick: { lineStyle: { color: chartTheme.line } },
+        axisLabel: {
+          color: chartTheme.mutedText,
+          hideOverlap: true,
+          formatter: (value: string) => value.slice(5)
+        }
+      },
+      yAxis: {
+        type: 'value',
+        name: '相对日均',
+        nameTextStyle: { color: chartTheme.mutedText },
+        axisLine: { show: false },
+        axisTick: { show: false },
+        axisLabel: {
+          color: chartTheme.mutedText,
+          formatter: '{value}%'
+        },
+        splitLine: { lineStyle: { color: chartTheme.line, type: 'dashed' } }
+      },
+      dataZoom: showZoom ? [
+        { type: 'inside', start: zoomStart, end: 100 },
+        {
+          type: 'slider',
+          height: 18,
+          bottom: 16,
+          start: zoomStart,
+          end: 100,
+          borderColor: chartTheme.border,
+          fillerColor: chartTheme.primaryLight,
+          handleStyle: { color: chartTheme.primary, borderColor: chartTheme.primary },
+          moveHandleStyle: { color: chartTheme.primaryLight },
+          dataBackground: {
+            lineStyle: { color: chartTheme.mutedText },
+            areaStyle: { color: chartTheme.primaryLight }
+          },
+          selectedDataBackground: {
+            lineStyle: { color: chartTheme.primary },
+            areaStyle: { color: chartTheme.primaryLight }
+          },
+          textStyle: { color: chartTheme.mutedText }
+        }
+      ] : undefined,
+      series: [
+        {
+          name: '单日比例',
+          type: 'bar',
+          data: ratios,
+          itemStyle: {
+            color: (params: any) => {
+              const value = Number(params?.value || 0)
+              if (value >= 200) return ratioBarColors.spike
+              if (value >= 150) return ratioBarColors.high
+              return ratioBarColors.normal
+            },
+            borderRadius: [4, 4, 0, 0]
+          },
+          markLine: {
+            symbol: 'none',
+            data: [{ yAxis: 100, name: '日均基线' }],
+            label: {
+              position: 'middle',
+              formatter: '日均基线',
+              color: chartTheme.secondaryText,
+              backgroundColor: chartTheme.surface,
+              borderColor: chartTheme.border,
+              borderWidth: 1,
+              borderRadius: 4,
+              padding: [2, 6]
+            },
+            lineStyle: { type: 'dashed', color: ratioBarColors.baseline }
+          }
+        },
+        {
+          name: '7日均线',
+          type: 'line',
+          data: movingAverage,
+          smooth: true,
+          showSymbol: false,
+          lineStyle: { width: 2, color: ratioBarColors.trend },
+          itemStyle: { color: ratioBarColors.trend }
+        }
+      ]
+    }
+  }
+
+  const selfSentDailyRatioData = getSelfSentDailyRatioData()
 
   const renderPageShell = (content: ReactNode) => (
     <div className="analytics-page-shell">
@@ -521,6 +735,16 @@ function AnalyticsPage() {
             <div className="chart-card"><h3>消息类型分布</h3><ReactECharts option={getTypeChartOption()} style={{ height: 300 }} /></div>
             <div className="chart-card"><h3>发送/接收比例</h3><ReactECharts option={getSendReceiveOption()} style={{ height: 300 }} /></div>
             <div className="chart-card wide"><h3>每小时消息分布</h3><ReactECharts option={getHourlyOption()} style={{ height: 250 }} /></div>
+            <div className="chart-card wide self-sent-ratio-card">
+              <div className="chart-title-row">
+                <h3>每日自身发送强度比例</h3>
+                <span>范围：全部 · 基线：{selfSentDailyRatioData.baseline.toFixed(1)} 条/天 · 共 {formatNumber(selfSentDailyDistribution?.totalMessages || 0)} 条</span>
+              </div>
+              <div className="chart-note">
+                比例 = 当日自身发送量 ÷ 全期每日平均自身发送量。超过 100% 表示高于本人基线
+              </div>
+              <ReactECharts key={chartThemeSignature} option={getSelfSentDailyRatioOption()} style={{ height: 320 }} />
+            </div>
           </div>
         </section>
         <section className="page-section">

@@ -4,7 +4,24 @@ import path from 'path'
 import { createHash, randomUUID } from 'crypto'
 import { ConfigService } from './config'
 
-export type InsightRecordTriggerReason = 'activity' | 'silence' | 'test'
+export type InsightRecordTriggerReason = 'activity' | 'silence' | 'test' | 'manual' | 'message_analysis'
+export type InsightRecordSourceType = 'insight' | 'message_analysis'
+
+export interface MessageInsightAnalysis {
+  explicitText: string
+  emotion: string
+  intent: string
+  topic: string
+}
+
+export interface MessageInsightTarget {
+  targetLocalId: number
+  targetCreateTime: number
+  targetMessageKey: string
+  targetSenderName: string
+  targetTextPreview: string
+  analysis: MessageInsightAnalysis
+}
 
 export interface InsightRecordLog {
   endpoint: string
@@ -20,11 +37,29 @@ export interface InsightRecordLog {
   finalInsight: string
   durationMs: number
   createdAt: number
+  responseFormatJson?: boolean
+  responseFormatFallback?: boolean
+  responseFormatFallbackReason?: string
+  targetMessage?: {
+    localId: number
+    createTime: number
+    messageKey: string
+    senderName: string
+    textPreview: string
+  }
+  contextStats?: {
+    requested: number
+    beforeTarget: number
+    afterTarget: number
+    readError?: string
+  }
+  parsedAnalysis?: MessageInsightAnalysis
 }
 
 export interface InsightRecord {
   id: string
   accountScope: string
+  sourceType: InsightRecordSourceType
   createdAt: number
   sessionId: string
   displayName: string
@@ -32,11 +67,13 @@ export interface InsightRecord {
   triggerReason: InsightRecordTriggerReason
   insight: string
   read: boolean
+  messageInsight?: MessageInsightTarget
   log: InsightRecordLog
 }
 
 export interface InsightRecordSummary {
   id: string
+  sourceType: InsightRecordSourceType
   createdAt: number
   sessionId: string
   displayName: string
@@ -44,6 +81,7 @@ export interface InsightRecordSummary {
   triggerReason: InsightRecordTriggerReason
   insight: string
   read: boolean
+  messageInsight?: MessageInsightTarget
 }
 
 export interface InsightRecordContactFacet {
@@ -58,6 +96,7 @@ export interface InsightRecordFilters {
   sessionId?: string
   startTime?: number
   endTime?: number
+  sourceType?: InsightRecordSourceType | 'all'
   limit?: number
   offset?: number
 }
@@ -136,13 +175,15 @@ class InsightRecordService {
   private toSummary(record: InsightRecord): InsightRecordSummary {
     return {
       id: record.id,
+      sourceType: record.sourceType || 'insight',
       createdAt: record.createdAt,
       sessionId: record.sessionId,
       displayName: record.displayName,
       avatarUrl: record.avatarUrl,
       triggerReason: record.triggerReason,
       insight: record.insight,
-      read: record.read
+      read: record.read,
+      messageInsight: record.messageInsight
     }
   }
 
@@ -156,8 +197,10 @@ class InsightRecordService {
     sessionId: string
     displayName: string
     avatarUrl?: string
+    sourceType?: InsightRecordSourceType
     triggerReason: InsightRecordTriggerReason
     insight: string
+    messageInsight?: MessageInsightTarget
     log: InsightRecordLog
   }): InsightRecord {
     this.ensureLoaded()
@@ -166,6 +209,7 @@ class InsightRecordService {
     const record: InsightRecord = {
       id: randomUUID(),
       accountScope: scope,
+      sourceType: input.sourceType || 'insight',
       createdAt: now,
       sessionId: input.sessionId,
       displayName: input.displayName,
@@ -173,6 +217,7 @@ class InsightRecordService {
       triggerReason: input.triggerReason,
       insight: input.insight,
       read: false,
+      messageInsight: input.messageInsight,
       log: input.log
     }
 
@@ -207,6 +252,7 @@ class InsightRecordService {
 
       const keyword = String(filters.keyword || '').trim().toLowerCase()
       const sessionId = String(filters.sessionId || '').trim()
+      const sourceType = String(filters.sourceType || 'all').trim()
       const startTime = Number(filters.startTime || 0)
       const endTime = Number(filters.endTime || 0)
       const offset = Math.max(0, Math.floor(Number(filters.offset || 0)))
@@ -215,10 +261,22 @@ class InsightRecordService {
       const filtered = allScoped
         .filter((record) => {
           if (sessionId && record.sessionId !== sessionId) return false
+          const recordSourceType = record.sourceType || 'insight'
+          if (sourceType !== 'all' && sourceType && recordSourceType !== sourceType) return false
           if (startTime > 0 && record.createdAt < startTime) return false
           if (endTime > 0 && record.createdAt > endTime) return false
           if (keyword) {
-            const haystack = `${record.displayName}\n${record.sessionId}\n${record.insight}`.toLowerCase()
+            const haystack = [
+              record.displayName,
+              record.sessionId,
+              record.insight,
+              record.messageInsight?.targetSenderName,
+              record.messageInsight?.targetTextPreview,
+              record.messageInsight?.analysis?.explicitText,
+              record.messageInsight?.analysis?.emotion,
+              record.messageInsight?.analysis?.intent,
+              record.messageInsight?.analysis?.topic
+            ].join('\n').toLowerCase()
             if (!haystack.includes(keyword)) return false
           }
           return true
@@ -254,6 +312,36 @@ class InsightRecordService {
     const record = this.records.find((item) => item.id === normalizedId && item.accountScope === scope)
     if (!record) return { success: false, error: '未找到该见解记录' }
     return { success: true, record }
+  }
+
+  findLatestMessageAnalysis(input: {
+    sessionId: string
+    targetLocalId?: number
+    targetCreateTime?: number
+    targetMessageKey?: string
+  }): InsightRecord | null {
+    this.ensureLoaded()
+    const scope = this.getCurrentAccountScope()
+    const sessionId = String(input.sessionId || '').trim()
+    if (!sessionId) return null
+    const targetLocalId = Math.floor(Number(input.targetLocalId || 0))
+    const targetCreateTime = Math.floor(Number(input.targetCreateTime || 0))
+    const targetMessageKey = String(input.targetMessageKey || '').trim()
+    const matches = this.records
+      .filter((record) => {
+        if (record.accountScope !== scope) return false
+        if ((record.sourceType || 'insight') !== 'message_analysis') return false
+        if (record.sessionId !== sessionId) return false
+        const target = record.messageInsight
+        if (!target) return false
+        if (targetLocalId > 0 && Number(target.targetLocalId || 0) === targetLocalId) {
+          if (targetCreateTime <= 0 || Number(target.targetCreateTime || 0) === targetCreateTime) return true
+        }
+        if (targetMessageKey && target.targetMessageKey === targetMessageKey) return true
+        return false
+      })
+      .sort((a, b) => b.createdAt - a.createdAt)
+    return matches[0] || null
   }
 
   markRecordRead(id: string): { success: boolean; error?: string } {

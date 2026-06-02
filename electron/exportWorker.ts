@@ -18,6 +18,7 @@ interface ExportWorkerConfig {
   resourcesPath?: string
   userDataPath?: string
   logEnabled?: boolean
+  isPackaged?: boolean
 }
 
 interface ExportProgressPayload {
@@ -148,6 +149,18 @@ async function run() {
   const { wcdbService } = await import('./services/wcdbService')
   wcdbService.setPaths(config.resourcesPath || '', config.userDataPath || '')
   wcdbService.setLogEnabled(config.logEnabled === true)
+  exportService.setRuntimeConfig({
+    dbPath: config.dbPath,
+    decryptKey: config.decryptKey,
+    myWxid: config.myWxid,
+    imageXorKey: config.imageXorKey,
+    imageAesKey: config.imageAesKey,
+    resourcesPath: config.resourcesPath,
+    appPath: config.resourcesPath ? require('path').dirname(config.resourcesPath) : __dirname,
+    isPackaged: config.isPackaged
+  })
+
+  const onProgress = (progress: any) => queueProgress(progress)
 
   const taskControl = config.taskId
     ? {
@@ -169,7 +182,10 @@ async function run() {
     chatService.setRuntimeConfig({
       dbPath: config.dbPath,
       decryptKey: config.decryptKey,
-      myWxid: config.myWxid
+      myWxid: config.myWxid,
+      resourcesPath: config.resourcesPath,
+      appPath: config.resourcesPath ? require('path').dirname(config.resourcesPath) : __dirname,
+      isPackaged: config.isPackaged
     })
     result = await contactExportService.exportContacts(
       String(config.outputDir || ''),

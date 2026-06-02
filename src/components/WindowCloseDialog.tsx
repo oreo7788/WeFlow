@@ -5,6 +5,7 @@ import './WindowCloseDialog.scss'
 interface WindowCloseDialogProps {
   open: boolean
   canMinimizeToTray: boolean
+  restoreMethod?: 'tray' | 'dock'
   onSelect: (action: 'tray' | 'quit', rememberChoice: boolean) => void
   onCancel: () => void
 }
@@ -12,10 +13,12 @@ interface WindowCloseDialogProps {
 export default function WindowCloseDialog({
   open,
   canMinimizeToTray,
+  restoreMethod = 'tray',
   onSelect,
   onCancel
 }: WindowCloseDialogProps) {
   const [rememberChoice, setRememberChoice] = useState(false)
+  const isDockRestore = restoreMethod === 'dock'
 
   useEffect(() => {
     if (!open) return
@@ -57,7 +60,9 @@ export default function WindowCloseDialog({
           <h2 id="window-close-dialog-title">关闭 WeFlow</h2>
           <p>
             {canMinimizeToTray
-              ? '你可以保留后台进程与本地 API，或者直接完全退出应用。'
+              ? isDockRestore
+                ? '你可以隐藏主窗口并保留后台进程与本地 API，稍后可从 Dock 或重新打开应用恢复。'
+                : '你可以保留后台进程与本地 API，或者直接完全退出应用。'
               : '当前系统托盘不可用，本次只能完全退出应用。'}
           </p>
         </div>
@@ -73,8 +78,12 @@ export default function WindowCloseDialog({
                 <Minimize2 size={18} />
               </span>
               <span className="window-close-dialog-option-text">
-                <strong>最小化到系统托盘</strong>
-                <span>继续保留后台进程和本地 API，稍后可从托盘恢复。</span>
+                <strong>{isDockRestore ? '隐藏主窗口' : '最小化到系统托盘'}</strong>
+                <span>
+                  {isDockRestore
+                    ? '继续保留后台进程和本地 API，稍后可从 Dock 或重新打开应用恢复。'
+                    : '继续保留后台进程和本地 API，稍后可从托盘恢复。'}
+                </span>
               </span>
             </button>
           )}

@@ -16,6 +16,10 @@ import { destroyNotificationWindow, registerNotificationHandlers, setNotificatio
 import { httpService } from './services/httpService'
 import { messagePushService } from './services/messagePushService'
 import { insightService } from './services/insightService'
+import { insightRecordService } from './services/insightRecordService'
+import { insightProfileService } from './services/insightProfileService'
+import { groupSummaryService } from './services/groupSummaryService'
+import { normalizeWeiboCookieInput, weiboService } from './services/social/weiboService'
 import { bizService } from './services/bizService'
 import { imageDownloadService } from './services/imageDownloadService'
 import { registerDatabaseHandlers } from './ipc/databaseHandlers'
@@ -108,13 +112,7 @@ let keyService: any
 if (process.platform === 'darwin') {
   keyService = new KeyServiceMac()
 } else if (process.platform === 'linux') {
-  // const { KeyServiceLinux } = require('./services/keyServiceLinux')
-  // keyService = new KeyServiceLinux()
-
-  import('./services/keyServiceLinux').then(({ KeyServiceLinux }) => {
-    keyService = new KeyServiceLinux();
-  });
-
+  keyService = new KeyServiceLinux()
 } else {
   keyService = new KeyService()
 }
@@ -128,6 +126,7 @@ let tray: Tray | null = null
 let isClosePromptVisible = false
 
 type WindowCloseBehavior = 'ask' | 'tray' | 'quit'
+type CloseRestoreMethod = 'tray' | 'dock'
 
 const normalizeSessionChatWindowSource = (source: unknown): 'chat' | 'export' => {
   return String(source || '').trim().toLowerCase() === 'export' ? 'export' : 'chat'
@@ -272,11 +271,40 @@ const isSilentStartupEnabled = (): boolean => {
   return configService?.get('silentStartup') === true
 }
 
+const getCloseRestoreMethod = (): CloseRestoreMethod | null => {
+  if (tray) return 'tray'
+  if (process.platform === 'darwin') return 'dock'
+  return null
+}
+
+const canKeepMainWindowInBackground = (): boolean => {
+  return getCloseRestoreMethod() !== null
+}
+
+const getPlatformIconName = (): string => {
+  if (process.platform === 'linux') return 'icon.png'
+  if (process.platform === 'darwin') return 'icon.icns'
+  return 'icon.ico'
+}
+
+const resolveAppIconPath = (): string => {
+  const iconName = getPlatformIconName()
+  if (!process.env.VITE_DEV_SERVER_URL) {
+    return join(process.resourcesPath, iconName)
+  }
+  if (process.platform === 'darwin') {
+    return join(__dirname, '../resources/icons/macos/icon.icns')
+  }
+  return join(__dirname, `../public/${iconName}`)
+}
+
 const requestMainWindowCloseConfirmation = (win: BrowserWindow): void => {
   if (isClosePromptVisible) return
   isClosePromptVisible = true
+  const restoreMethod = getCloseRestoreMethod()
   win.webContents.send('window:confirmCloseRequested', {
-    canMinimizeToTray: Boolean(tray)
+    canMinimizeToTray: restoreMethod !== null,
+    restoreMethod: restoreMethod ?? undefined
   })
 }
 
@@ -412,7 +440,7 @@ function createWindow(options: { autoShow?: boolean } = {}) {
       return
     }
 
-    if (closeBehavior === 'tray' && tray) {
+    if (closeBehavior === 'tray' && canKeepMainWindowInBackground()) {
       win.hide()
       return
     }
@@ -1168,6 +1196,7 @@ app.whenReady().then(async () => {
   })
   messagePushService.start()
   insightService.start()
+  groupSummaryService.start()
   await delay(200)
 
   // 已完成引导时，在 Splash 阶段预热核心数据（联系人、消息库索引等）
@@ -1299,6 +1328,14 @@ app.whenReady().then(async () => {
   await httpService.autoStart()
 
   app.on('activate', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (!mainWindow.isVisible()) {
+        mainWindow.show()
+      }
+      mainWindow.focus()
+      return
+    }
+
     if (BrowserWindow.getAllWindows().length === 0) {
       mainWindow = createWindow()
     }
@@ -1330,6 +1367,7 @@ const shutdownAppServices = async (): Promise<void> => {
     destroyNotificationWindow()
     messagePushService.stop()
     insightService.stop()
+    groupSummaryService.stop()
     // 兜底：5秒后强制退出，防止某个异步任务卡住导致进程残留
     const forceExitTimer = setTimeout(() => {
       console.warn('[App] Force exit after timeout')
@@ -1363,4 +1401,3 @@ app.on('window-all-closed', () => {
     app.quit()
   }
 })
-

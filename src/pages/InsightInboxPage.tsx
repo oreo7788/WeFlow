@@ -7,6 +7,7 @@ import type {
   InsightRecordContactFacet,
   InsightRecordFilters,
   InsightRecordListResult,
+  InsightRecordSourceType,
   InsightRecordSummary,
   InsightRecordTriggerReason
 } from '../types/electron'
@@ -15,6 +16,7 @@ import './InsightInboxPage.scss'
 const INSIGHT_AVATAR_URL = './assets/insight/AI_Insight.png'
 
 type DateFilterMode = 'all' | 'today' | 'week' | 'custom'
+type SourceFilterMode = InsightRecordSourceType | 'all'
 
 function getStartOfDay(date: Date): number {
   const next = new Date(date)
@@ -62,16 +64,23 @@ function formatGroupDate(timestamp: number): string {
 }
 
 function getTriggerLabel(reason: InsightRecordTriggerReason): string {
+  if (reason === 'message_analysis') return '深度解析'
   if (reason === 'silence') return '沉默提醒'
   if (reason === 'test') return '测试见解'
+  if (reason === 'manual') return '手动触发'
   return '活跃分析'
+}
+
+function getSourceLabel(sourceType?: InsightRecordSourceType): string {
+  return sourceType === 'message_analysis' ? '深度解析' : 'AI 见解'
 }
 
 function buildLogText(record: InsightRecord): string {
   const log = record.log
-  return [
+  const lines = [
     `时间：${new Date(record.createdAt).toLocaleString('zh-CN')}`,
     `联系人：${record.displayName} (${record.sessionId})`,
+    `来源：${getSourceLabel(record.sourceType)}`,
     `触发类型：${getTriggerLabel(record.triggerReason)}`,
     `接口地址：${log.endpoint}`,
     `模型：${log.model}`,
@@ -90,7 +99,23 @@ function buildLogText(record: InsightRecord): string {
     '',
     '最终见解：',
     log.finalInsight
-  ].join('\n')
+  ]
+
+  if (record.sourceType === 'message_analysis') {
+    lines.splice(8, 0,
+      `JSON Mode：${log.responseFormatJson ? '启用' : '未启用'}`,
+      `JSON Mode 降级：${log.responseFormatFallback ? '是' : '否'}`,
+      `降级原因：${log.responseFormatFallbackReason || '无'}`,
+      `上下文：请求 ${log.contextStats?.requested ?? log.contextCount} 条，前 ${log.contextStats?.beforeTarget ?? 0} 条，后 ${log.contextStats?.afterTarget ?? 0} 条`,
+      `上下文读取异常：${log.contextStats?.readError || '无'}`
+    )
+    lines.splice(4, 0,
+      `目标消息：${record.messageInsight?.targetSenderName || log.targetMessage?.senderName || ''}：${record.messageInsight?.targetTextPreview || log.targetMessage?.textPreview || ''}`,
+      `目标定位：localId=${record.messageInsight?.targetLocalId || log.targetMessage?.localId || 0}, createTime=${record.messageInsight?.targetCreateTime || log.targetMessage?.createTime || 0}, key=${record.messageInsight?.targetMessageKey || log.targetMessage?.messageKey || ''}`
+    )
+  }
+
+  return lines.join('\n')
 }
 
 export default function InsightInboxPage() {
@@ -101,6 +126,7 @@ export default function InsightInboxPage() {
   const [keyword, setKeyword] = useState('')
   const [contactSearch, setContactSearch] = useState('')
   const [selectedSessionId, setSelectedSessionId] = useState('')
+  const [sourceType, setSourceType] = useState<SourceFilterMode>('all')
   const [dateMode, setDateMode] = useState<DateFilterMode>('all')
   const [customStart, setCustomStart] = useState(formatDateInput(new Date()))
   const [customEnd, setCustomEnd] = useState(formatDateInput(new Date()))
@@ -133,11 +159,12 @@ export default function InsightInboxPage() {
   const filters = useMemo<InsightRecordFilters>(() => ({
     keyword: keyword.trim() || undefined,
     sessionId: selectedSessionId || undefined,
+    sourceType,
     startTime: dateRange.startTime,
     endTime: dateRange.endTime,
     limit: 200,
     offset: 0
-  }), [dateRange.endTime, dateRange.startTime, keyword, selectedSessionId])
+  }), [dateRange.endTime, dateRange.startTime, keyword, selectedSessionId, sourceType])
 
   const loadRecords = useCallback(async () => {
     setLoading(true)
@@ -200,6 +227,16 @@ export default function InsightInboxPage() {
   }, [contactSearch, contacts])
 
   const openChat = (record: InsightRecordSummary) => {
+    if (record.sourceType === 'message_analysis' && record.messageInsight) {
+      const query = new URLSearchParams({
+        sessionId: record.sessionId,
+        jumpSource: 'messageAnalysis',
+        jumpLocalId: String(record.messageInsight.targetLocalId || 0),
+        jumpCreateTime: String(record.messageInsight.targetCreateTime || 0)
+      })
+      navigate(`/chat?${query.toString()}`)
+      return
+    }
     navigate(`/chat?sessionId=${encodeURIComponent(record.sessionId)}`)
   }
 
@@ -305,6 +342,7 @@ export default function InsightInboxPage() {
                         </div>
                       </div>
                       <div className="insight-card-actions">
+                        <span className={`insight-source-pill ${record.sourceType || 'insight'}`}>{getSourceLabel(record.sourceType)}</span>
                         <span className={`insight-trigger-pill ${record.triggerReason}`}>{getTriggerLabel(record.triggerReason)}</span>
                         <span className="insight-time">{formatRecordTime(record.createdAt)}</span>
                         <button className="insight-action-btn" onClick={() => openChat(record)} title="打开聊天">
@@ -318,7 +356,22 @@ export default function InsightInboxPage() {
                         </button>
                       </div>
                     </div>
+                    {record.sourceType === 'message_analysis' && record.messageInsight && (
+                      <div className="message-analysis-target">
+                        <span className="message-analysis-target-label">目标消息</span>
+                        <span className="message-analysis-target-text">
+                          {record.messageInsight.targetSenderName}：{record.messageInsight.targetTextPreview}
+                        </span>
+                      </div>
+                    )}
                     <p className="insight-body">{record.insight}</p>
+                    {record.sourceType === 'message_analysis' && record.messageInsight && (
+                      <div className="message-analysis-tags">
+                        <span>情绪：{record.messageInsight.analysis.emotion}</span>
+                        <span>意图：{record.messageInsight.analysis.intent}</span>
+                        <span>话题：{record.messageInsight.analysis.topic}</span>
+                      </div>
+                    )}
                   </div>
                 </article>
               ))}
@@ -344,6 +397,28 @@ export default function InsightInboxPage() {
               placeholder="搜索见解或联系人..."
             />
             {keyword && <button onClick={() => setKeyword('')}><X size={14} /></button>}
+          </div>
+        </div>
+
+        <div className="insight-filter-widget">
+          <div className="insight-widget-title">
+            <Sparkles size={14} />
+            <span>来源类型</span>
+          </div>
+          <div className="insight-source-tabs">
+            {[
+              { value: 'all', label: '全部' },
+              { value: 'insight', label: 'AI 见解' },
+              { value: 'message_analysis', label: '深度解析' }
+            ].map((option) => (
+              <button
+                key={option.value}
+                className={sourceType === option.value ? 'active' : ''}
+                onClick={() => setSourceType(option.value as SourceFilterMode)}
+              >
+                {option.label}
+              </button>
+            ))}
           </div>
         </div>
 
@@ -440,9 +515,44 @@ export default function InsightInboxPage() {
                   `Max Tokens: ${logRecord.log.maxTokens}`,
                   `Temperature: ${logRecord.log.temperature}`,
                   `Duration: ${logRecord.log.durationMs}ms`,
-                  `Trigger: ${getTriggerLabel(logRecord.triggerReason)}`
+                  `Source: ${getSourceLabel(logRecord.sourceType)}`,
+                  `Trigger: ${getTriggerLabel(logRecord.triggerReason)}`,
+                  ...(logRecord.sourceType === 'message_analysis'
+                    ? [
+                        `JSON Mode: ${logRecord.log.responseFormatJson ? 'enabled' : 'disabled'}`,
+                        `JSON Fallback: ${logRecord.log.responseFormatFallback ? 'yes' : 'no'}`,
+                        `Fallback Reason: ${logRecord.log.responseFormatFallbackReason || 'none'}`
+                      ]
+                    : [])
                 ].join('\n')}</pre>
               </section>
+              {logRecord.sourceType === 'message_analysis' && (
+                <section>
+                  <h4>深度解析目标</h4>
+                  <pre>{[
+                    `Sender: ${logRecord.messageInsight?.targetSenderName || logRecord.log.targetMessage?.senderName || ''}`,
+                    `Preview: ${logRecord.messageInsight?.targetTextPreview || logRecord.log.targetMessage?.textPreview || ''}`,
+                    `LocalId: ${logRecord.messageInsight?.targetLocalId || logRecord.log.targetMessage?.localId || 0}`,
+                    `CreateTime: ${logRecord.messageInsight?.targetCreateTime || logRecord.log.targetMessage?.createTime || 0}`,
+                    `MessageKey: ${logRecord.messageInsight?.targetMessageKey || logRecord.log.targetMessage?.messageKey || ''}`,
+                    `Context Requested: ${logRecord.log.contextStats?.requested ?? logRecord.log.contextCount}`,
+                    `Context Before: ${logRecord.log.contextStats?.beforeTarget ?? 0}`,
+                    `Context After: ${logRecord.log.contextStats?.afterTarget ?? 0}`,
+                    `Context Error: ${logRecord.log.contextStats?.readError || 'none'}`
+                  ].join('\n')}</pre>
+                </section>
+              )}
+              {logRecord.sourceType === 'message_analysis' && logRecord.log.parsedAnalysis && (
+                <section>
+                  <h4>解析字段</h4>
+                  <pre>{[
+                    `explicitText: ${logRecord.log.parsedAnalysis.explicitText}`,
+                    `emotion: ${logRecord.log.parsedAnalysis.emotion}`,
+                    `intent: ${logRecord.log.parsedAnalysis.intent}`,
+                    `topic: ${logRecord.log.parsedAnalysis.topic}`
+                  ].join('\n')}</pre>
+                </section>
+              )}
               <section>
                 <h4>System Prompt</h4>
                 <pre>{logRecord.log.systemPrompt}</pre>

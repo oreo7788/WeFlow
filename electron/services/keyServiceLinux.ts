@@ -5,7 +5,7 @@ import { execFile, exec, spawn } from 'child_process'
 import { promisify } from 'util'
 import crypto from 'crypto'
 import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
+const require = createRequire(__filename);
 
 const execFileAsync = promisify(execFile)
 const execAsync = promisify(exec)

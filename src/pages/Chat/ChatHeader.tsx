@@ -8,8 +8,10 @@ import {
   Info,
   Loader2,
   Mic,
+  Newspaper,
   RefreshCw,
   Search,
+  Sparkles,
   Users
 } from 'lucide-react'
 import { Avatar } from '../../components/Avatar'
@@ -21,9 +23,11 @@ export interface ChatHeaderProps {
   isGroupChat: boolean
   standaloneSessionWindow: boolean
   showGroupMembersPanel: boolean
+  showGroupSummaryPanel: boolean
   showJumpPopover: boolean
   showInSessionSearch: boolean
   showDetailPanel: boolean
+  aiGroupSummaryEnabled: boolean
   shouldHideStandaloneDetailButton: boolean
   isPrivateSnsSupported: boolean
   isExportActionBusy: boolean
@@ -32,10 +36,13 @@ export interface ChatHeaderProps {
   isBatchTranscribing: boolean
   runningBatchVoiceTaskType?: BatchVoiceTaskType
   isBatchDecrypting: boolean
+  isTriggeringSessionInsight: boolean
   isRefreshingMessages: boolean
   isLoadingMessages: boolean
   currentSessionId?: string | null
   jumpCalendarWrapRef: React.RefObject<HTMLDivElement | null>
+  onTriggerSessionInsight: () => void
+  onToggleGroupSummaryPanel: () => void
   onGroupAnalytics: () => void
   onToggleGroupMembersPanel: () => void
   onExportCurrentSession: () => void
@@ -53,9 +60,11 @@ function ChatHeader({
   isGroupChat,
   standaloneSessionWindow,
   showGroupMembersPanel,
+  showGroupSummaryPanel,
   showJumpPopover,
   showInSessionSearch,
   showDetailPanel,
+  aiGroupSummaryEnabled,
   shouldHideStandaloneDetailButton,
   isPrivateSnsSupported,
   isExportActionBusy,
@@ -64,10 +73,13 @@ function ChatHeader({
   isBatchTranscribing,
   runningBatchVoiceTaskType,
   isBatchDecrypting,
+  isTriggeringSessionInsight,
   isRefreshingMessages,
   isLoadingMessages,
   currentSessionId,
   jumpCalendarWrapRef,
+  onTriggerSessionInsight,
+  onToggleGroupSummaryPanel,
   onGroupAnalytics,
   onToggleGroupMembersPanel,
   onExportCurrentSession,
@@ -102,6 +114,26 @@ function ChatHeader({
         {isGroupChat && <div className="header-subtitle">群聊</div>}
       </div>
       <div className="header-actions">
+        <button
+          className={`icon-btn session-insight-btn${isTriggeringSessionInsight ? ' triggering' : ''}`}
+          onClick={onTriggerSessionInsight}
+          disabled={!currentSessionId || isTriggeringSessionInsight}
+          title={isTriggeringSessionInsight ? '正在生成 AI 见解' : '立即触发当前聊天 AI 见解'}
+          aria-label="立即触发当前聊天 AI 见解"
+        >
+          {isTriggeringSessionInsight ? <Loader2 size={18} className="spin" /> : <Sparkles size={18} />}
+        </button>
+        {isGroupChat && aiGroupSummaryEnabled && (
+          <button
+            className={`icon-btn group-summary-btn ${showGroupSummaryPanel ? 'active' : ''}`}
+            onClick={onToggleGroupSummaryPanel}
+            disabled={!currentSessionId}
+            title="AI 群聊总结"
+            aria-label="AI 群聊总结"
+          >
+            <Newspaper size={18} />
+          </button>
+        )}
         {!standaloneSessionWindow && isGroupChat && (
           <button className="icon-btn group-analytics-btn" onClick={onGroupAnalytics} title="群聊分析">
             <BarChart3 size={18} />
@@ -203,9 +235,11 @@ function areEqual(prev: ChatHeaderProps, next: ChatHeaderProps) {
     prev.isGroupChat === next.isGroupChat &&
     prev.standaloneSessionWindow === next.standaloneSessionWindow &&
     prev.showGroupMembersPanel === next.showGroupMembersPanel &&
+    prev.showGroupSummaryPanel === next.showGroupSummaryPanel &&
     prev.showJumpPopover === next.showJumpPopover &&
     prev.showInSessionSearch === next.showInSessionSearch &&
     prev.showDetailPanel === next.showDetailPanel &&
+    prev.aiGroupSummaryEnabled === next.aiGroupSummaryEnabled &&
     prev.shouldHideStandaloneDetailButton === next.shouldHideStandaloneDetailButton &&
     prev.isPrivateSnsSupported === next.isPrivateSnsSupported &&
     prev.isExportActionBusy === next.isExportActionBusy &&
@@ -214,10 +248,13 @@ function areEqual(prev: ChatHeaderProps, next: ChatHeaderProps) {
     prev.isBatchTranscribing === next.isBatchTranscribing &&
     prev.runningBatchVoiceTaskType === next.runningBatchVoiceTaskType &&
     prev.isBatchDecrypting === next.isBatchDecrypting &&
+    prev.isTriggeringSessionInsight === next.isTriggeringSessionInsight &&
     prev.isRefreshingMessages === next.isRefreshingMessages &&
     prev.isLoadingMessages === next.isLoadingMessages &&
     prev.currentSessionId === next.currentSessionId &&
     prev.jumpCalendarWrapRef === next.jumpCalendarWrapRef &&
+    prev.onTriggerSessionInsight === next.onTriggerSessionInsight &&
+    prev.onToggleGroupSummaryPanel === next.onToggleGroupSummaryPanel &&
     prev.onGroupAnalytics === next.onGroupAnalytics &&
     prev.onToggleGroupMembersPanel === next.onToggleGroupMembersPanel &&
     prev.onExportCurrentSession === next.onExportCurrentSession &&

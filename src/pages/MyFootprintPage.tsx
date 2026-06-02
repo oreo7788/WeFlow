@@ -770,12 +770,12 @@ function MyFootprintPage() {
         <>
           <section className="kpi-grid">
             <button type="button" className="kpi-card" onClick={() => setTimelineMode('private')}>
-              <span className="kpi-label">有聊天的人数</span>
+              <span className="kpi-label">收到消息的人数</span>
               <strong>{data.summary.private_inbound_people}</strong>
               <small>回复了其中 {data.summary.private_replied_people} 人</small>
             </button>
             <button type="button" className="kpi-card" onClick={() => setTimelineMode('private')}>
-              <span className="kpi-label">我有回复的人数</span>
+              <span className="kpi-label">发送消息的人数</span>
               <strong>{data.summary.private_outbound_people}</strong>
               <small>回复率 {formatPercent(data.summary.private_reply_rate)}</small>
             </button>

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * insightService.ts
  *
  * AI 见解后台服务：
@@ -21,7 +21,13 @@ import { chatService, ChatSession, Message } from './chatService'
 import { snsService } from './snsService'
 import { weiboService } from './social/weiboService'
 import { showNotification } from '../windows/notificationWindow'
-import { insightRecordService, type InsightRecordLog, type InsightRecordTriggerReason } from './insightRecordService'
+import { insightProfileService } from './insightProfileService'
+import {
+  insightRecordService,
+  type InsightRecordLog,
+  type InsightRecordTriggerReason,
+  type MessageInsightAnalysis
+} from './insightRecordService'
 
 // ─── 常量 ────────────────────────────────────────────────────────────────────
 
@@ -41,6 +47,18 @@ const API_MAX_TOKENS_MIN = 1
 const API_MAX_TOKENS_MAX = 2_000_000
 const API_TEMPERATURE = 0.7
 const INSIGHT_NOTIFICATION_AVATAR_URL = './assets/insight/AI_Insight.png'
+const MIMO_FOOTPRINT_MIN_TOKENS = 4096
+const FOOTPRINT_API_TEMPERATURE = 0.2
+
+const DEFAULT_FOOTPRINT_SYSTEM_PROMPT = `你是“我的微信足迹”模块的总结器，只能根据用户提供的统计数据生成最终复盘文案。
+硬性输出规则：
+1. 只输出最终总结正文，不输出思考过程、步骤、标题、列表、JSON、Markdown、代码块、引号或字段名。
+2. 输出 2 句中文，总长度 60-160 字，最多 180 字。
+3. 第 1 句概括联络活跃度、回复情况或 @我情况；第 2 句给出一个当天/当前范围内可执行的沟通建议。
+4. 必须引用至少 2 个输入数字，例如人数、回复率、@我次数或群聊数。
+5. 数据为 0 时如实说明，不臆测具体聊天内容、关系、情绪、诊断或原因。
+6. 禁止出现“首先”“其次”“根据”“综上”“作为AI”“我认为”“以下是”等过程性表达。
+输出格式：直接输出两句自然中文。`
 
 /** 沉默天数阈值默认值 */
 const DEFAULT_SILENCE_DAYS = 3
@@ -79,7 +97,35 @@ interface SharedAiModelConfig {
   maxTokens: number
 }
 
+interface SessionInsightTriggerResult {
+  success: boolean
+  message: string
+  recordId?: string
+  insight?: string
+  skipped?: boolean
+  notificationEnabled?: boolean
+}
+
 type InsightFilterMode = 'whitelist' | 'blacklist'
+
+interface CallApiOptions {
+  temperature?: number
+  disableThinking?: boolean
+  useMaxCompletionTokens?: boolean
+  responseFormatJson?: boolean
+}
+
+class ApiRequestError extends Error {
+  statusCode?: number
+  responseBody?: string
+
+  constructor(message: string, statusCode?: number, responseBody?: string) {
+    super(message)
+    this.name = 'ApiRequestError'
+    this.statusCode = statusCode
+    this.responseBody = responseBody
+  }
+}
 
 // ─── 日志 ─────────────────────────────────────────────────────────────────────
 
@@ -161,6 +207,100 @@ function normalizeSessionIdList(value: unknown): string[] {
   return Array.from(new Set(value.map((item) => String(item || '').trim()).filter(Boolean)))
 }
 
+function isMimoModel(apiBaseUrl: string, model: string): boolean {
+  const target = `${apiBaseUrl} ${model}`.toLowerCase()
+  return target.includes('mimo') || target.includes('xiaomi')
+}
+
+function buildFootprintSystemPrompt(customPrompt: string): string {
+  const custom = String(customPrompt || '').trim()
+  if (!custom || custom === DEFAULT_FOOTPRINT_SYSTEM_PROMPT) {
+    return DEFAULT_FOOTPRINT_SYSTEM_PROMPT
+  }
+  return `${DEFAULT_FOOTPRINT_SYSTEM_PROMPT}
+
+用户自定义补充要求如下，只能在不违反上述硬性输出规则时执行：
+${custom}`
+}
+
+function normalizeFootprintInsight(text: string): string {
+  let normalized = String(text || '').trim()
+  if (!normalized) return ''
+
+  if (normalized.startsWith('{') && normalized.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(normalized)
+      const value = parsed?.summary || parsed?.insight || parsed?.content || parsed?.text
+      if (typeof value === 'string' && value.trim()) {
+        normalized = value.trim()
+      }
+    } catch { }
+  }
+
+  normalized = normalized
+    .replace(/^```(?:text|markdown|md|json)?/i, '')
+    .replace(/```$/i, '')
+    .replace(/^(足迹复盘|AI足迹总结|AI 足迹总结|总结|建议)[:：]\s*/i, '')
+    .replace(/^\s*[-*•]\s*/gm, '')
+    .replace(/\s*\n+\s*/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+
+  if (normalized.length > 180) {
+    const sliced = normalized.slice(0, 180)
+    const lastStop = Math.max(sliced.lastIndexOf('。'), sliced.lastIndexOf('！'), sliced.lastIndexOf('？'))
+    normalized = lastStop >= 60 ? sliced.slice(0, lastStop + 1) : `${sliced.replace(/[，,；;、\s]+$/g, '')}。`
+  }
+
+  return normalized
+}
+
+function clampText(value: unknown, maxLength: number): string {
+  const text = String(value || '').replace(/\s+/g, ' ').trim()
+  if (text.length <= maxLength) return text
+  return `${text.slice(0, Math.max(0, maxLength - 1))}…`
+}
+
+function stripJsonFence(value: string): string {
+  const text = String(value || '').trim()
+  const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
+  if (fenced) return fenced[1].trim()
+  const firstBrace = text.indexOf('{')
+  const lastBrace = text.lastIndexOf('}')
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return text.slice(firstBrace, lastBrace + 1).trim()
+  }
+  return text
+}
+
+function parseMessageInsightAnalysis(rawOutput: string): MessageInsightAnalysis {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(stripJsonFence(rawOutput))
+  } catch {
+    throw new Error('模型输出格式异常：不是合法 JSON')
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('模型输出格式异常：JSON 根节点不是对象')
+  }
+  const source = parsed as Record<string, unknown>
+  const explicitText = clampText(source.explicit_text ?? source.explicitText, 120)
+  const emotion = clampText(source.emotion, 16)
+  const intent = clampText(source.intent, 20)
+  const topic = clampText(source.topic, 20)
+  if (!explicitText || !emotion || !intent || !topic) {
+    throw new Error('模型输出格式异常：缺少必要字段')
+  }
+  return { explicitText, emotion, intent, topic }
+}
+
+function shouldFallbackJsonMode(error: unknown): boolean {
+  const statusCode = Number((error as ApiRequestError)?.statusCode || 0)
+  if (statusCode === 400 || statusCode === 404 || statusCode === 422) return true
+  const text = `${(error as Error)?.message || ''}\n${(error as ApiRequestError)?.responseBody || ''}`.toLowerCase()
+  return text.includes('response_format') || text.includes('json_object') || text.includes('json mode')
+}
+
 /**
  * 调用 OpenAI 兼容 API（非流式），返回模型第一条消息内容。
  * 使用 Node 原生 https/http 模块，无需任何第三方 SDK。
@@ -171,7 +311,8 @@ function callApi(
   model: string,
   messages: Array<{ role: string; content: string }>,
   timeoutMs: number = API_TIMEOUT_MS,
-  maxTokens: number = API_MAX_TOKENS_DEFAULT
+  maxTokens: number = API_MAX_TOKENS_DEFAULT,
+  options: CallApiOptions = {}
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const endpoint = buildApiUrl(apiBaseUrl, '/chat/completions')
@@ -183,15 +324,28 @@ function callApi(
       return
     }
 
-    const body = JSON.stringify({
+    const normalizedMaxTokens = normalizeApiMaxTokens(maxTokens)
+    const payload: Record<string, unknown> = {
       model,
       messages,
-      max_tokens: normalizeApiMaxTokens(maxTokens),
-      temperature: API_TEMPERATURE,
+      temperature: options.temperature ?? API_TEMPERATURE,
       stream: false
-    })
+    }
+    if (options.useMaxCompletionTokens) {
+      payload.max_completion_tokens = normalizedMaxTokens
+    } else {
+      payload.max_tokens = normalizedMaxTokens
+    }
+    if (options.disableThinking) {
+      payload.thinking = { type: 'disabled' }
+      payload.enable_thinking = false
+    }
+    if (options?.responseFormatJson) {
+      payload.response_format = { type: 'json_object' }
+    }
+    const body = JSON.stringify(payload)
 
-    const options = {
+    const requestOptions = {
       hostname: urlObj.hostname,
       port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
       path: urlObj.pathname + urlObj.search,
@@ -205,17 +359,27 @@ function callApi(
 
     const isHttps = urlObj.protocol === 'https:'
     const requestFn = isHttps ? https.request : http.request
-    const req = requestFn(options, (res) => {
+    const req = requestFn(requestOptions, (res) => {
       let data = ''
       res.on('data', (chunk) => { data += chunk })
       res.on('end', () => {
         try {
+          if (res.statusCode && res.statusCode >= 400) {
+            reject(new ApiRequestError(`API 请求失败 (${res.statusCode}): ${data.slice(0, 200)}`, res.statusCode, data))
+            return
+          }
           const parsed = JSON.parse(data)
           const content = parsed?.choices?.[0]?.message?.content
           if (typeof content === 'string' && content.trim()) {
             resolve(content.trim())
           } else {
-            reject(new Error(`API 返回格式异常: ${data.slice(0, 200)}`))
+            const finishReason = parsed?.choices?.[0]?.finish_reason
+            const reasoningContent = parsed?.choices?.[0]?.message?.reasoning_content
+            if (typeof reasoningContent === 'string' && reasoningContent.trim()) {
+              reject(new Error(`API 仅返回推理内容未返回正文${finishReason ? `（finish_reason=${finishReason}）` : ''}，请增大最大输出 Token 或关闭思考模式`))
+              return
+            }
+            reject(new Error(`API 返回格式异常${finishReason ? `（finish_reason=${finishReason}）` : ''}: ${data.slice(0, 200)}`))
           }
         } catch (e) {
           reject(new Error(`JSON 解析失败: ${data.slice(0, 200)}`))
@@ -304,6 +468,7 @@ class InsightService {
     this.clearTimers()
     this.clearRuntimeCache()
     this.processing = false
+    insightProfileService.cancelActiveTask('AI 见解服务已停止，画像任务已取消')
     if (hadActiveFlow) {
       insightLog('INFO', '已停止')
     }
@@ -319,6 +484,7 @@ class InsightService {
     }
 
     if (normalizedKey === 'dbPath' || normalizedKey === 'decryptKey' || normalizedKey === 'myWxid') {
+      insightProfileService.cancelActiveTask('数据库或账号配置已变化，画像任务已取消')
       this.clearRuntimeCache()
     }
 
@@ -328,6 +494,7 @@ class InsightService {
   handleConfigCleared(): void {
     this.clearTimers()
     this.clearRuntimeCache()
+    insightProfileService.cancelActiveTask('配置已清除，画像任务已取消')
     this.processing = false
   }
 
@@ -465,11 +632,14 @@ class InsightService {
       const sessionId = session.username?.trim() || ''
       const displayName = session.displayName || sessionId
       insightLog('INFO', `测试目标会话：${displayName} (${sessionId})`)
-      await this.generateInsightForSession({
+      const result = await this.generateInsightForSession({
         sessionId,
         displayName,
         triggerReason: 'test'
       })
+      if (!result.success) {
+        return { success: false, message: result.message }
+      }
       const notificationEnabled = this.config.get('aiInsightNotificationEnabled') !== false
       return {
         success: true,
@@ -479,6 +649,47 @@ class InsightService {
       }
     } catch (e) {
       return { success: false, message: `测试失败：${(e as Error).message}` }
+    }
+  }
+
+  /**
+   * 手动对指定会话立即触发一次 AI 见解。
+   * 只新增触发入口；实际上下文、朋友圈/微博拼接、prompt 和入库仍走 generateInsightForSession。
+   */
+  async triggerSessionInsight(params: {
+    sessionId: string
+    displayName?: string
+    avatarUrl?: string
+  }): Promise<SessionInsightTriggerResult> {
+    const sessionId = String(params?.sessionId || '').trim()
+    if (!sessionId) {
+      return { success: false, message: '当前会话无效，无法触发 AI 见解' }
+    }
+    if (!this.isEnabled()) {
+      return { success: false, message: '请先在设置中开启「AI 见解」' }
+    }
+
+    const { apiBaseUrl, apiKey } = this.getSharedAiModelConfig()
+    if (!apiBaseUrl || !apiKey) {
+      return { success: false, message: '请先填写通用 AI 模型配置（API 地址和 Key）' }
+    }
+
+    try {
+      const connectResult = await chatService.connect()
+      if (!connectResult.success) {
+        return { success: false, message: '数据库连接失败，请先在"数据库连接"页完成配置' }
+      }
+      this.dbConnected = true
+
+      const displayName = String(params?.displayName || sessionId).trim() || sessionId
+      insightLog('INFO', `手动触发当前会话见解：${displayName} (${sessionId})`)
+      return await this.generateInsightForSession({
+        sessionId,
+        displayName,
+        triggerReason: 'manual'
+      })
+    } catch (error) {
+      return { success: false, message: `触发失败：${(error as Error).message}` }
     }
   }
 
@@ -523,6 +734,7 @@ class InsightService {
     const rangeLabel = String(params?.rangeLabel || '').trim() || '当前范围'
     const privateSegments = Array.isArray(params?.privateSegments) ? params.privateSegments.slice(0, 6) : []
     const mentionGroups = Array.isArray(params?.mentionGroups) ? params.mentionGroups.slice(0, 6) : []
+    const mimoMode = isMimoModel(apiBaseUrl, model)
 
     const topPrivateText = privateSegments.length > 0
       ? privateSegments
@@ -546,20 +758,31 @@ class InsightService {
         .join('\n')
       : '无'
 
-    const defaultSystemPrompt = `你是用户的聊天足迹教练，负责基于统计数据给出一段简明复盘。
-要求：
-1. 输出 2-3 句，总长度不超过 180 字。
-2. 必须包含：总体观察 + 一个可执行建议。
-3. 语气务实，不夸张，不使用 Markdown。`
     const customPrompt = String(this.config.get('aiFootprintSystemPrompt') || '').trim()
-    const systemPrompt = customPrompt || defaultSystemPrompt
+    const systemPrompt = buildFootprintSystemPrompt(customPrompt)
 
-    const userPromptBase = `统计范围：${rangeLabel}
-有聊天的人数：${Number(summary.private_inbound_people) || 0}
-我有回复的人数：${Number(summary.private_outbound_people) || 0}
-回复率：${(((Number(summary.private_reply_rate) || 0) * 100)).toFixed(1)}%
-@我次数：${Number(summary.mention_count) || 0}
-涉及群聊：${Number(summary.mention_group_count) || 0}
+    const inboundPeople = Number(summary.private_inbound_people) || 0
+    const repliedPeople = Number(summary.private_replied_people) || 0
+    const outboundPeople = Number(summary.private_outbound_people) || 0
+    const replyRate = (((Number(summary.private_reply_rate) || 0) * 100)).toFixed(1)
+    const mentionCount = Number(summary.mention_count) || 0
+    const mentionGroupCount = Number(summary.mention_group_count) || 0
+
+    const userPromptBase = `任务：基于下面的“我的微信足迹”统计生成最终总结正文。
+
+输出要求再强调一次：
+- 只输出 2 句中文自然语言，不要输出分析过程。
+- 不要输出 JSON / Markdown / 列表 / 标题 / 代码块。
+- 第 1 句做总体观察，第 2 句给一个可执行建议。
+- 必须引用至少 2 个统计数字。
+
+统计范围：${rangeLabel}
+有聊天的人数：${inboundPeople}
+我有回复的人数：${outboundPeople}
+实际回复了其中：${repliedPeople}
+回复率：${replyRate}%
+@我次数：${mentionCount}
+涉及群聊：${mentionGroupCount}
 
 私聊重点：
 ${topPrivateText}
@@ -567,7 +790,7 @@ ${topPrivateText}
 群聊@我重点：
 ${topMentionText}
 
-请给出足迹复盘（2-3句，含建议）：`
+现在直接输出最终总结正文：`
     const userPrompt = appendPromptCurrentTime(userPromptBase)
 
     try {
@@ -580,13 +803,219 @@ ${topMentionText}
           { role: 'user', content: userPrompt }
         ],
         25_000,
-        maxTokens
+        mimoMode ? Math.max(maxTokens, MIMO_FOOTPRINT_MIN_TOKENS) : maxTokens,
+        {
+          temperature: FOOTPRINT_API_TEMPERATURE,
+          disableThinking: mimoMode,
+          useMaxCompletionTokens: mimoMode
+        }
       )
-      const insight = result.trim()
+      const insight = normalizeFootprintInsight(result)
       if (!insight) return { success: false, message: '模型返回为空' }
       return { success: true, message: '生成成功', insight }
     } catch (error) {
       return { success: false, message: `生成失败：${(error as Error).message}` }
+    }
+  }
+
+  async generateMessageInsight(params: {
+    sessionId: string
+    displayName?: string
+    avatarUrl?: string
+    targetLocalId?: number
+    targetCreateTime?: number
+    targetMessageKey?: string
+    targetText: string
+    targetSenderName?: string
+    contextCount?: number
+    forceRefresh?: boolean
+  }): Promise<{ success: boolean; message: string; cached?: boolean; recordId?: string; data?: MessageInsightAnalysis }> {
+    const enabled = this.config.get('aiMessageInsightEnabled') === true
+    if (!enabled) {
+      return { success: false, message: '请先在设置中开启「消息解析」' }
+    }
+
+    const sessionId = String(params?.sessionId || '').trim()
+    const targetText = clampText(params?.targetText || '', 500)
+    const targetCreateTime = Math.floor(Number(params?.targetCreateTime || 0))
+    const targetLocalId = Math.floor(Number(params?.targetLocalId || 0))
+    const targetMessageKey = String(params?.targetMessageKey || '').trim()
+    if (!sessionId || !targetText || targetCreateTime <= 0) {
+      return { success: false, message: '目标消息无效，无法解析' }
+    }
+
+    if (params?.forceRefresh !== true) {
+      const cached = insightRecordService.findLatestMessageAnalysis({
+        sessionId,
+        targetLocalId,
+        targetCreateTime,
+        targetMessageKey
+      })
+      if (cached?.messageInsight?.analysis) {
+        return {
+          success: true,
+          message: '已读取缓存解析',
+          cached: true,
+          recordId: cached.id,
+          data: cached.messageInsight.analysis
+        }
+      }
+    }
+
+    const { apiBaseUrl, apiKey, model, maxTokens } = this.getSharedAiModelConfig()
+    if (!apiBaseUrl || !apiKey) {
+      return { success: false, message: '请先填写通用 AI 模型配置（API 地址和 Key）' }
+    }
+
+    const configuredContextCount = Number(this.config.get('aiMessageInsightContextCount') || 50)
+    const contextCount = Math.max(1, Math.min(200, Math.floor(Number(params?.contextCount || configuredContextCount) || 50)))
+    const displayName = await this.resolveInsightSessionDisplayName(sessionId, String(params?.displayName || sessionId))
+    const targetSenderName = clampText(params?.targetSenderName || displayName, 40) || displayName
+    const targetTextPreview = clampText(targetText, 120)
+    let avatarUrl = String(params?.avatarUrl || '').trim() || undefined
+    if (!avatarUrl) {
+      try {
+        const contact = await chatService.getContactAvatar(sessionId)
+        avatarUrl = String(contact?.avatarUrl || '').trim() || undefined
+      } catch {
+        avatarUrl = undefined
+      }
+    }
+
+    let beforeMessages: Message[] = []
+    let afterMessages: Message[] = []
+    let contextReadError = ''
+    try {
+      const aroundResult = await chatService.getMessagesAround(
+        sessionId,
+        { localId: targetLocalId, createTime: targetCreateTime, messageKey: targetMessageKey },
+        contextCount
+      )
+      if (aroundResult.success) {
+        beforeMessages = aroundResult.before || []
+        afterMessages = aroundResult.after || []
+      } else {
+        contextReadError = aroundResult.error || '读取上下文失败'
+      }
+    } catch (error) {
+      contextReadError = (error as Error).message || String(error)
+    }
+
+    const formatLine = (message: Message) => {
+      const senderName = message.isSend === 1 ? '我' : (message.senderDisplayName || targetSenderName || displayName)
+      return `${this.formatInsightMessageTimestamp(message.createTime)} ${senderName}：${this.formatInsightMessageContent(message)}`
+    }
+    const beforeText = beforeMessages.length > 0 ? beforeMessages.map(formatLine).join('\n') : '无'
+    const afterText = afterMessages.length > 0 ? afterMessages.map(formatLine).join('\n') : '无'
+
+    const DEFAULT_MESSAGE_INSIGHT_PROMPT = `你是一个克制、准确的聊天语义分析助手。你的任务是把用户选中的一句聊天消息做深度解析，帮助用户理解对方未明说的含义。
+
+严格要求：
+1. 必须且只能输出合法的纯 JSON。
+2. 禁止输出解释说明、前言后语，禁止使用 Markdown 或代码块。
+3. 不要编造上下文没有支持的信息；不确定时用谨慎表述。
+4. explicit_text 用自然中文说明这句话可能想表达的真实含义，80字以内。
+5. emotion、intent、topic 必须是短标签。
+
+JSON 输出格式：
+{
+  "explicit_text": "暗示转明示，80字以内",
+  "emotion": "2-6字情绪标签",
+  "intent": "2-8字意图标签",
+  "topic": "2-8字话题标签"
+}`
+    const customPrompt = String(this.config.get('aiMessageInsightSystemPrompt') || '').trim()
+    const systemPrompt = customPrompt || DEFAULT_MESSAGE_INSIGHT_PROMPT
+    const userPromptBase = `会话：${displayName}
+目标发送者：${targetSenderName}
+目标消息时间：${this.formatInsightMessageTimestamp(targetCreateTime)}
+
+目标消息：
+${targetText}
+
+目标消息之前的上下文（${beforeMessages.length} 条）：
+${beforeText}
+
+目标消息之后的上下文（${afterMessages.length} 条）：
+${afterText}
+
+请分析目标消息，只输出指定 JSON。`
+    const userPrompt = appendPromptCurrentTime(userPromptBase)
+    const endpoint = buildApiUrl(apiBaseUrl, '/chat/completions')
+    const requestMessages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ]
+
+    let rawOutput = ''
+    let responseFormatJson = true
+    let responseFormatFallback = false
+    let responseFormatFallbackReason = ''
+    const startedAt = Date.now()
+    try {
+      try {
+        rawOutput = await callApi(apiBaseUrl, apiKey, model, requestMessages, API_TIMEOUT_MS, maxTokens, { responseFormatJson: true })
+      } catch (error) {
+        if (!shouldFallbackJsonMode(error)) throw error
+        responseFormatJson = false
+        responseFormatFallback = true
+        responseFormatFallbackReason = (error as Error).message || 'response_format 不受支持'
+        rawOutput = await callApi(apiBaseUrl, apiKey, model, requestMessages, API_TIMEOUT_MS, maxTokens)
+      }
+      const analysis = parseMessageInsightAnalysis(rawOutput)
+      const finalInsight = analysis.explicitText
+      const log: InsightRecordLog = {
+        endpoint,
+        model,
+        maxTokens,
+        temperature: API_TEMPERATURE,
+        triggerReason: 'message_analysis',
+        allowContext: true,
+        contextCount,
+        systemPrompt,
+        userPrompt,
+        rawOutput,
+        finalInsight,
+        durationMs: Date.now() - startedAt,
+        createdAt: Date.now(),
+        responseFormatJson,
+        responseFormatFallback,
+        responseFormatFallbackReason,
+        targetMessage: {
+          localId: targetLocalId,
+          createTime: targetCreateTime,
+          messageKey: targetMessageKey,
+          senderName: targetSenderName,
+          textPreview: targetTextPreview
+        },
+        contextStats: {
+          requested: contextCount,
+          beforeTarget: beforeMessages.length,
+          afterTarget: afterMessages.length,
+          readError: contextReadError || undefined
+        },
+        parsedAnalysis: analysis
+      }
+      const record = insightRecordService.addRecord({
+        sessionId,
+        displayName,
+        avatarUrl,
+        sourceType: 'message_analysis',
+        triggerReason: 'message_analysis',
+        insight: finalInsight,
+        messageInsight: {
+          targetLocalId,
+          targetCreateTime,
+          targetMessageKey,
+          targetSenderName,
+          targetTextPreview,
+          analysis
+        },
+        log
+      })
+      return { success: true, message: '解析完成', cached: false, recordId: record.id, data: analysis }
+    } catch (error) {
+      return { success: false, message: `解析失败：${(error as Error).message}` }
     }
   }
 
@@ -1099,10 +1528,10 @@ ${topMentionText}
     displayName: string
     triggerReason: InsightRecordTriggerReason
     silentDays?: number
-  }): Promise<void> {
+  }): Promise<SessionInsightTriggerResult> {
     const { sessionId, displayName, triggerReason, silentDays } = params
-    if (!sessionId) return
-    if (!this.isEnabled()) return
+    if (!sessionId) return { success: false, message: '会话无效，无法生成见解' }
+    if (!this.isEnabled()) return { success: false, message: '请先在设置中开启「AI 见解」' }
 
     const { apiBaseUrl, apiKey, model, maxTokens } = this.getSharedAiModelConfig()
     const allowContext = this.config.get('aiInsightAllowContext') as boolean
@@ -1120,7 +1549,7 @@ ${topMentionText}
 
     if (!apiBaseUrl || !apiKey) {
       insightLog('WARN', 'API 地址或 Key 未配置，跳过见解生成')
-      return
+      return { success: false, message: '请先填写通用 AI 模型配置（API 地址和 Key）' }
     }
 
     // ── 构建 prompt ────────────────────────────────────────────────────────────
@@ -1141,6 +1570,7 @@ ${topMentionText}
 
     const momentsContextSection = await this.getMomentsContextSection(sessionId)
     const socialContextSection = await this.getSocialContextSection(sessionId)
+    const profileContextSection = insightProfileService.getProfileContextSection(sessionId)
 
     // ── 默认 system prompt（稳定内容，有利于 provider 端 prompt cache 命中）────
     const DEFAULT_SYSTEM_PROMPT = `你是用户的私人关系观察助手，名叫"见解"。你的任务是主动提供有价值的观察和建议。
@@ -1160,6 +1590,7 @@ ${topMentionText}
         ? `已 ${silentDays} 天未联系「${resolvedDisplayName}」。`
         : '',
       contextSection,
+      profileContextSection,
       momentsContextSection,
       socialContextSection,
       '请给出你的见解（≤80字）：'
@@ -1210,9 +1641,9 @@ ${topMentionText}
       // 模型主动选择跳过
       if (result.trim().toUpperCase() === 'SKIP' || result.trim().startsWith('SKIP')) {
         insightLog('INFO', `模型选择跳过 ${resolvedDisplayName}`)
-        return
+        return { success: true, message: `模型判断「${resolvedDisplayName}」暂无可生成的见解`, skipped: true }
       }
-      if (!this.isEnabled()) return
+      if (!this.isEnabled()) return { success: false, message: 'AI 见解已关闭，生成结果未保存' }
 
       const insight = result.trim()
       const notifTitle = `见解 · ${resolvedDisplayName}`
@@ -1277,6 +1708,15 @@ ${topMentionText}
 
       insightLog('INFO', `已完成 ${resolvedDisplayName} 的见解处理`)
       this.recordTrigger(sessionId)
+      return {
+        success: true,
+        message: insightNotificationEnabled
+          ? `已生成「${resolvedDisplayName}」的 AI 见解，请查看通知弹窗`
+          : `已生成「${resolvedDisplayName}」的 AI 见解，AI 见解消息通知当前已关闭`,
+        recordId: record.id,
+        insight,
+        notificationEnabled: insightNotificationEnabled
+      }
     } catch (e) {
       insightDebugSection(
         'ERROR',
@@ -1284,6 +1724,7 @@ ${topMentionText}
         `错误信息：${(e as Error).message}\n\n堆栈：\n${(e as Error).stack || '[无堆栈]'}`
       )
       insightLog('ERROR', `API 调用失败 (${resolvedDisplayName}): ${(e as Error).message}`)
+      return { success: false, message: `生成失败：${(e as Error).message}` }
     }
   }
 
@@ -1329,5 +1770,3 @@ ${topMentionText}
 }
 
 export const insightService = new InsightService()
-
-

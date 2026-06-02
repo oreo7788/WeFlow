@@ -7,14 +7,20 @@ body:
     attributes:
       value: |
         在提问之前，请确保你已经仔细阅读过我们的官方文档。
+  - type: input
+    id: confirm-unique
+    attributes:
+      label: 确认唯一性
+      description: 请输入：我已确认没有相同问题出现
+      placeholder: 我已确认没有相同问题出现
+    validations:
+      required: true
   - type: checkboxes
     id: pre-check
     attributes:
       label: 提交前确认
       options:
         - label: 我已阅读过相关文档
-          required: true
-        - label: 我已搜索过现有的 Issues，没有找到类似问题
           required: true
   - type: dropdown
     id: question-type

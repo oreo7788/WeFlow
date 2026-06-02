@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
+import { createPortal } from 'react-dom'
 import { ChevronDown } from 'lucide-react'
 import * as configService from '../../services/config'
 import { ExportDateRangeDialog } from './ExportDateRangeDialog'
@@ -56,6 +58,48 @@ const getOptionLabel = (options: ReadonlyArray<{ value: string; label: string }>
   return options.find((option) => option.value === value)?.label ?? value
 }
 
+interface SelectDropdownPlacement {
+  left: number
+  width: number
+  maxHeight: number
+  top?: number
+  bottom?: number
+}
+
+const resolveSelectDropdownPlacement = (anchor: HTMLElement | null): SelectDropdownPlacement | null => {
+  if (!anchor || typeof window === 'undefined') return null
+
+  const rect = anchor.getBoundingClientRect()
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight
+  const viewportMargin = 12
+  const dropdownGap = 6
+  const minDropdownHeight = 128
+  const availableWidth = Math.max(160, viewportWidth - viewportMargin * 2)
+  const width = Math.min(Math.max(rect.width, 220), availableWidth)
+  const left = Math.max(viewportMargin, Math.min(rect.left, viewportWidth - width - viewportMargin))
+  const spaceBelow = Math.max(0, viewportHeight - rect.bottom - viewportMargin - dropdownGap)
+  const spaceAbove = Math.max(0, rect.top - viewportMargin - dropdownGap)
+  const shouldOpenAbove = spaceBelow < minDropdownHeight && spaceAbove > spaceBelow
+  const availableHeight = shouldOpenAbove ? spaceAbove : spaceBelow
+  const maxHeight = Math.max(96, Math.min(320, availableHeight))
+
+  return shouldOpenAbove
+    ? { left, width, maxHeight, bottom: viewportHeight - rect.top + dropdownGap }
+    : { left, width, maxHeight, top: rect.bottom + dropdownGap }
+}
+
+const getSelectDropdownStyle = (placement: SelectDropdownPlacement): CSSProperties => ({
+  position: 'fixed',
+  top: placement.top,
+  bottom: placement.bottom,
+  left: placement.left,
+  right: 'auto',
+  width: placement.width,
+  maxHeight: placement.maxHeight,
+  zIndex: 9300
+})
+
 export function ExportDefaultsSettingsForm({
   onNotify,
   onDefaultsChanged,
@@ -66,6 +110,10 @@ export function ExportDefaultsSettingsForm({
   const [isExportDateRangeDialogOpen, setIsExportDateRangeDialogOpen] = useState(false)
   const exportExcelColumnsDropdownRef = useRef<HTMLDivElement>(null)
   const exportFileNamingModeDropdownRef = useRef<HTMLDivElement>(null)
+  const exportExcelColumnsMenuRef = useRef<HTMLDivElement>(null)
+  const exportFileNamingModeMenuRef = useRef<HTMLDivElement>(null)
+  const [exportExcelColumnsPlacement, setExportExcelColumnsPlacement] = useState<SelectDropdownPlacement | null>(null)
+  const [exportFileNamingModePlacement, setExportFileNamingModePlacement] = useState<SelectDropdownPlacement | null>(null)
 
   const [exportDefaultFormat, setExportDefaultFormat] = useState('excel')
   const [exportDefaultAvatars, setExportDefaultAvatars] = useState(true)
@@ -122,10 +170,20 @@ export function ExportDefaultsSettingsForm({
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as Node
-      if (showExportExcelColumnsSelect && exportExcelColumnsDropdownRef.current && !exportExcelColumnsDropdownRef.current.contains(target)) {
+      if (
+        showExportExcelColumnsSelect &&
+        exportExcelColumnsDropdownRef.current &&
+        !exportExcelColumnsDropdownRef.current.contains(target) &&
+        !exportExcelColumnsMenuRef.current?.contains(target)
+      ) {
         setShowExportExcelColumnsSelect(false)
       }
-      if (showExportFileNamingModeSelect && exportFileNamingModeDropdownRef.current && !exportFileNamingModeDropdownRef.current.contains(target)) {
+      if (
+        showExportFileNamingModeSelect &&
+        exportFileNamingModeDropdownRef.current &&
+        !exportFileNamingModeDropdownRef.current.contains(target) &&
+        !exportFileNamingModeMenuRef.current?.contains(target)
+      ) {
         setShowExportFileNamingModeSelect(false)
       }
     }
@@ -133,6 +191,30 @@ export function ExportDefaultsSettingsForm({
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [showExportExcelColumnsSelect, showExportFileNamingModeSelect])
+
+  const updateSelectDropdownPlacements = useCallback(() => {
+    if (showExportExcelColumnsSelect) {
+      setExportExcelColumnsPlacement(resolveSelectDropdownPlacement(exportExcelColumnsDropdownRef.current))
+    }
+    if (showExportFileNamingModeSelect) {
+      setExportFileNamingModePlacement(resolveSelectDropdownPlacement(exportFileNamingModeDropdownRef.current))
+    }
+  }, [showExportExcelColumnsSelect, showExportFileNamingModeSelect])
+
+  useEffect(() => {
+    if (!showExportExcelColumnsSelect) setExportExcelColumnsPlacement(null)
+    if (!showExportFileNamingModeSelect) setExportFileNamingModePlacement(null)
+    if (!showExportExcelColumnsSelect && !showExportFileNamingModeSelect) return
+
+    updateSelectDropdownPlacements()
+    window.addEventListener('resize', updateSelectDropdownPlacements)
+    document.addEventListener('scroll', updateSelectDropdownPlacements, true)
+
+    return () => {
+      window.removeEventListener('resize', updateSelectDropdownPlacements)
+      document.removeEventListener('scroll', updateSelectDropdownPlacements, true)
+    }
+  }, [showExportExcelColumnsSelect, showExportFileNamingModeSelect, updateSelectDropdownPlacements])
 
   const exportExcelColumnsValue = exportDefaultExcelCompactColumns ? 'compact' : 'full'
   const exportDateRangeLabel = useMemo(() => getExportDateRangeLabel(exportDefaultDateRange), [exportDefaultDateRange])
@@ -142,6 +224,73 @@ export function ExportDefaultsSettingsForm({
   const notify = (text: string, success = true) => {
     onNotify?.(text, success)
   }
+
+  const fileNamingModeDropdown = showExportFileNamingModeSelect && exportFileNamingModePlacement
+    ? createPortal(
+      <div
+        ref={exportFileNamingModeMenuRef}
+        className="select-dropdown select-dropdown-floating"
+        role="listbox"
+        style={getSelectDropdownStyle(exportFileNamingModePlacement)}
+        onClick={(event) => event.stopPropagation()}
+      >
+        {exportFileNamingModeOptions.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            role="option"
+            aria-selected={exportDefaultFileNamingMode === option.value}
+            className={`select-option ${exportDefaultFileNamingMode === option.value ? 'active' : ''}`}
+            onClick={async () => {
+              setExportDefaultFileNamingMode(option.value)
+              await configService.setExportDefaultFileNamingMode(option.value)
+              onDefaultsChanged?.({ fileNamingMode: option.value })
+              notify('已更新导出文件命名方式', true)
+              setShowExportFileNamingModeSelect(false)
+            }}
+          >
+            <span className="option-label">{option.label}</span>
+            <span className="option-desc">{option.desc}</span>
+          </button>
+        ))}
+      </div>,
+      document.body
+    )
+    : null
+
+  const excelColumnsDropdown = showExportExcelColumnsSelect && exportExcelColumnsPlacement
+    ? createPortal(
+      <div
+        ref={exportExcelColumnsMenuRef}
+        className="select-dropdown select-dropdown-floating"
+        role="listbox"
+        style={getSelectDropdownStyle(exportExcelColumnsPlacement)}
+        onClick={(event) => event.stopPropagation()}
+      >
+        {exportExcelColumnOptions.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            role="option"
+            aria-selected={exportExcelColumnsValue === option.value}
+            className={`select-option ${exportExcelColumnsValue === option.value ? 'active' : ''}`}
+            onClick={async () => {
+              const compact = option.value === 'compact'
+              setExportDefaultExcelCompactColumns(compact)
+              await configService.setExportDefaultExcelCompactColumns(compact)
+              onDefaultsChanged?.({ excelCompactColumns: compact })
+              notify(compact ? '已启用精简列' : '已启用完整列', true)
+              setShowExportExcelColumnsSelect(false)
+            }}
+          >
+            <span className="option-label">{option.label}</span>
+            <span className="option-desc">{option.desc}</span>
+          </button>
+        ))}
+      </div>,
+      document.body
+    )
+    : null
 
   return (
     <div className={`export-defaults-settings-form ${layout === 'split' ? 'layout-split' : 'layout-stacked'}`}>
@@ -273,6 +422,8 @@ export function ExportDefaultsSettingsForm({
             <button
               type="button"
               className={`select-trigger ${showExportFileNamingModeSelect ? 'open' : ''}`}
+              aria-haspopup="listbox"
+              aria-expanded={showExportFileNamingModeSelect}
               onClick={() => {
                 setShowExportFileNamingModeSelect(!showExportFileNamingModeSelect)
                 setShowExportExcelColumnsSelect(false)
@@ -282,27 +433,7 @@ export function ExportDefaultsSettingsForm({
               <span className="select-value">{exportFileNamingModeLabel}</span>
               <ChevronDown size={16} />
             </button>
-            {showExportFileNamingModeSelect && (
-              <div className="select-dropdown">
-                {exportFileNamingModeOptions.map((option) => (
-                  <button
-                    key={option.value}
-                    type="button"
-                    className={`select-option ${exportDefaultFileNamingMode === option.value ? 'active' : ''}`}
-                    onClick={async () => {
-                      setExportDefaultFileNamingMode(option.value)
-                      await configService.setExportDefaultFileNamingMode(option.value)
-                      onDefaultsChanged?.({ fileNamingMode: option.value })
-                      notify('已更新导出文件命名方式', true)
-                      setShowExportFileNamingModeSelect(false)
-                    }}
-                  >
-                    <span className="option-label">{option.label}</span>
-                    <span className="option-desc">{option.desc}</span>
-                  </button>
-                ))}
-              </div>
-            )}
+            {fileNamingModeDropdown}
           </div>
         </div>
       </div>
@@ -317,6 +448,8 @@ export function ExportDefaultsSettingsForm({
             <button
               type="button"
               className={`select-trigger ${showExportExcelColumnsSelect ? 'open' : ''}`}
+              aria-haspopup="listbox"
+              aria-expanded={showExportExcelColumnsSelect}
               onClick={() => {
                 setShowExportExcelColumnsSelect(!showExportExcelColumnsSelect)
                 setShowExportFileNamingModeSelect(false)
@@ -326,28 +459,7 @@ export function ExportDefaultsSettingsForm({
               <span className="select-value">{exportExcelColumnsLabel}</span>
               <ChevronDown size={16} />
             </button>
-            {showExportExcelColumnsSelect && (
-              <div className="select-dropdown">
-                {exportExcelColumnOptions.map((option) => (
-                  <button
-                    key={option.value}
-                    type="button"
-                    className={`select-option ${exportExcelColumnsValue === option.value ? 'active' : ''}`}
-                    onClick={async () => {
-                      const compact = option.value === 'compact'
-                      setExportDefaultExcelCompactColumns(compact)
-                      await configService.setExportDefaultExcelCompactColumns(compact)
-                      onDefaultsChanged?.({ excelCompactColumns: compact })
-                      notify(compact ? '已启用精简列' : '已启用完整列', true)
-                      setShowExportExcelColumnsSelect(false)
-                    }}
-                  >
-                    <span className="option-label">{option.label}</span>
-                    <span className="option-desc">{option.desc}</span>
-                  </button>
-                ))}
-              </div>
-            )}
+            {excelColumnsDropdown}
           </div>
         </div>
       </div>
@@ -371,7 +483,8 @@ export function ExportDefaultsSettingsForm({
                   notify(`已${e.target.checked ? '开启' : '关闭'}默认导出图片`, true)
                 }}
               />
-              图片
+              <span className="media-default-check" aria-hidden="true" />
+              <span>图片</span>
             </label>
             <label>
               <input
@@ -385,7 +498,8 @@ export function ExportDefaultsSettingsForm({
                   notify(`已${e.target.checked ? '开启' : '关闭'}默认导出语音`, true)
                 }}
               />
-              语音
+              <span className="media-default-check" aria-hidden="true" />
+              <span>语音</span>
             </label>
             <label>
               <input
@@ -399,7 +513,8 @@ export function ExportDefaultsSettingsForm({
                   notify(`已${e.target.checked ? '开启' : '关闭'}默认导出视频`, true)
                 }}
               />
-              视频
+              <span className="media-default-check" aria-hidden="true" />
+              <span>视频</span>
             </label>
             <label>
               <input
@@ -413,7 +528,8 @@ export function ExportDefaultsSettingsForm({
                   notify(`已${e.target.checked ? '开启' : '关闭'}默认导出表情包`, true)
                 }}
               />
-              表情包
+              <span className="media-default-check" aria-hidden="true" />
+              <span>表情包</span>
             </label>
             <label>
               <input
@@ -427,7 +543,8 @@ export function ExportDefaultsSettingsForm({
                   notify(`已${e.target.checked ? '开启' : '关闭'}默认导出文件`, true)
                 }}
               />
-              文件
+              <span className="media-default-check" aria-hidden="true" />
+              <span>文件</span>
             </label>
           </div>
         </div>

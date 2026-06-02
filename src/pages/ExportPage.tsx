@@ -4,6 +4,9 @@ import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { createPortal } from 'react-dom'
 import {
   Aperture,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   Calendar,
   Check,
   CheckSquare,
@@ -648,6 +651,41 @@ const formatYmdHmDateTime = (timestamp?: number): string => {
   const min = `${d.getMinutes()}`.padStart(2, '0')
   return `${y}-${m}-${day} ${h}:${min}`
 }
+
+const formatLatestMessageTimeFromSeconds = (
+  timestamp?: number,
+  now: number = Date.now()
+): { text: string; title: string } => {
+  if (!timestamp || !Number.isFinite(timestamp) || timestamp <= 0) {
+    return { text: '--', title: '' }
+  }
+  const ms = timestamp * 1000
+  const absolute = formatYmdHmDateTime(ms)
+  const diff = Math.max(0, now - ms)
+  const minute = 60 * 1000
+  const hour = 60 * minute
+  const day = 24 * hour
+  if (diff < minute) {
+    return { text: '刚刚', title: absolute }
+  }
+  if (diff < hour) {
+    const minutes = Math.max(1, Math.floor(diff / minute))
+    return { text: `${minutes} 分钟前`, title: absolute }
+  }
+  if (diff < day) {
+    const hours = Math.max(1, Math.floor(diff / hour))
+    return { text: `${hours} 小时前`, title: absolute }
+  }
+  return { text: absolute, title: absolute }
+}
+
+type ContactsSortKey = 'messageCount' | 'latestMessageTime'
+type ContactsSortOrder = 'desc' | 'asc'
+interface ContactsSortConfig {
+  key: ContactsSortKey | null
+  order: ContactsSortOrder | null
+}
+const DEFAULT_CONTACTS_SORT_CONFIG: ContactsSortConfig = { key: null, order: null }
 
 const isSingleContactSession = (sessionId: string): boolean => {
   const normalized = String(sessionId || '').trim()
@@ -2288,6 +2326,18 @@ function ExportPage() {
   const [sessionMutualFriendsDialogTarget, setSessionMutualFriendsDialogTarget] = useState<SessionSnsTimelineTarget | null>(null)
   const [sessionMutualFriendsSearch, setSessionMutualFriendsSearch] = useState('')
   const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTaskRecord[]>([])
+  const [contactsSortConfig, setContactsSortConfig] = useState<ContactsSortConfig>(DEFAULT_CONTACTS_SORT_CONFIG)
+
+  const toggleContactsSort = useCallback((key: ContactsSortKey) => {
+    setContactsSortConfig(prev => {
+      if (prev.key !== key) {
+        return { key, order: 'desc' }
+      }
+      if (prev.order === 'desc') return { key, order: 'asc' }
+      if (prev.order === 'asc') return DEFAULT_CONTACTS_SORT_CONFIG
+      return { key, order: 'desc' }
+    })
+  }, [])
 
   const [exportFolder, setExportFolder] = useState('')
   const [writeLayout, setWriteLayout] = useState<configService.ExportWriteLayout>('B')
@@ -4390,7 +4440,7 @@ function ExportPage() {
     try {
       if (prioritizedSessionIds.length > 0) {
         patchSessionLoadTraceStage(prioritizedSessionIds, 'messageCount', 'loading')
-        const priorityResult = await window.electronAPI.chat.getSessionMessageCounts(prioritizedSessionIds)
+        const priorityResult = await window.electronAPI.chat.getSessionMessageCounts(prioritizedSessionIds, { bypassSessionCache: true, preferHintCache: false })
         if (isStale()) return { ...accumulatedCounts }
         if (priorityResult.success) {
           applyCounts(priorityResult.counts)
@@ -4407,7 +4457,7 @@ function ExportPage() {
 
       if (remainingSessionIds.length > 0) {
         patchSessionLoadTraceStage(remainingSessionIds, 'messageCount', 'loading')
-        const remainingResult = await window.electronAPI.chat.getSessionMessageCounts(remainingSessionIds)
+        const remainingResult = await window.electronAPI.chat.getSessionMessageCounts(remainingSessionIds, { bypassSessionCache: true, preferHintCache: false })
         if (isStale()) return { ...accumulatedCounts }
         if (remainingResult.success) {
           applyCounts(remainingResult.counts)
@@ -6687,34 +6737,47 @@ function ExportPage() {
         )
       })
 
-    const indexedContacts = contacts.map((contact, index) => ({
-      contact,
-      index,
-      count: (() => {
-        const counted = normalizeMessageCount(sessionMessageCounts[contact.username])
-        if (typeof counted === 'number') return counted
-        const hinted = normalizeMessageCount(sessionRowByUsername.get(contact.username)?.messageCountHint)
-        return hinted
-      })()
-    }))
+    const indexedContacts = contacts.map((contact, index) => {
+      const sessionRow = sessionRowByUsername.get(contact.username)
+      const counted = normalizeMessageCount(sessionMessageCounts[contact.username])
+      const hinted = normalizeMessageCount(sessionRow?.messageCountHint)
+      const count = typeof counted === 'number' ? counted : hinted
+      const rowTs = sessionRow?.lastTimestamp || sessionRow?.sortTimestamp
+      const latestTime = typeof rowTs === 'number' && rowTs > 0 ? rowTs : undefined
+      return { contact, index, count, latestTime }
+    })
+
+    const compareNullable = (a: number | undefined, b: number | undefined, order: ContactsSortOrder): number => {
+      const aHas = typeof a === 'number' && Number.isFinite(a)
+      const bHas = typeof b === 'number' && Number.isFinite(b)
+      if (aHas && bHas) {
+        const diff = (a as number) - (b as number)
+        return order === 'desc' ? -diff : diff
+      }
+      if (aHas) return -1
+      if (bHas) return 1
+      return 0
+    }
+
+    const sortKey = contactsSortConfig.key
+    const sortOrder = contactsSortConfig.order ?? 'desc'
 
     indexedContacts.sort((a, b) => {
-      const aHasCount = typeof a.count === 'number'
-      const bHasCount = typeof b.count === 'number'
-      if (aHasCount && bHasCount) {
-        const diff = (b.count as number) - (a.count as number)
+      if (sortKey === 'latestMessageTime') {
+        const diff = compareNullable(a.latestTime, b.latestTime, sortOrder)
         if (diff !== 0) return diff
-      } else if (aHasCount) {
-        return -1
-      } else if (bHasCount) {
-        return 1
+      } else if (sortKey === 'messageCount') {
+        const diff = compareNullable(a.count, b.count, sortOrder)
+        if (diff !== 0) return diff
+      } else {
+        const diff = compareNullable(a.count, b.count, 'desc')
+        if (diff !== 0) return diff
       }
-      // 无统计值或同分时保持原顺序，避免列表频繁跳动。
       return a.index - b.index
     })
 
     return indexedContacts.map(item => item.contact)
-  }, [contactsList, activeTab, searchKeyword, sessionMessageCounts, sessionRowByUsername])
+  }, [contactsList, activeTab, searchKeyword, sessionMessageCounts, sessionRowByUsername, contactsSortConfig])
 
   const keywordMatchedContactUsernameSet = useMemo(() => {
     const keyword = searchKeyword.trim().toLowerCase()
@@ -6923,7 +6986,7 @@ function ExportPage() {
   useEffect(() => {
     contactsVirtuosoRef.current?.scrollToIndex({ index: 0, align: 'start' })
     setIsContactsListAtTop(true)
-  }, [activeTab, searchKeyword])
+  }, [activeTab, searchKeyword, contactsSortConfig])
 
   const collectVisibleSessionMetricTargets = useCallback((sourceContacts: ContactInfo[]): string[] => {
     if (sourceContacts.length === 0) return []
@@ -7639,11 +7702,28 @@ function ExportPage() {
       scheduleSessionMutualFriendsWorker()
     }
 
+    // 记录刷新前的会话时间戳
+    const oldTimestamps = new Map(
+      sessionsRef.current.map(s => [s.username, s.lastTimestamp || s.sortTimestamp || 0])
+    )
+
     await Promise.all([
       loadContactsList({ scopeKey }),
       loadSnsStats({ full: true }),
       loadSnsUserPostCounts({ force: true })
     ])
+
+    // 找出有变动的会话（最后消息时间变化）
+    const changedSessions = sessionsRef.current.filter(session => {
+      const oldTs = oldTimestamps.get(session.username) || 0
+      const newTs = session.lastTimestamp || session.sortTimestamp || 0
+      return newTs > oldTs
+    })
+
+    // 只对有变动的会话重新加载消息数量
+    if (changedSessions.length > 0) {
+      await loadSessionMessageCounts(changedSessions, activeTabRef.current, { scopeKey })
+    }
 
     const currentDetailSessionId = showSessionDetailPanel
       ? String(sessionDetail?.wxid || '').trim()
@@ -8417,6 +8497,15 @@ function ExportPage() {
     const hintedMessages = normalizeMessageCount(matchedSession?.messageCountHint)
     const displayedMessageCount = countedMessages ?? hintedMessages
     const mediaMetric = sessionContentMetrics[contact.username]
+    const rowLatestTs = matchedSession?.lastTimestamp || matchedSession?.sortTimestamp
+    const resolvedLatestTs = typeof rowLatestTs === 'number' && rowLatestTs > 0 ? rowLatestTs : undefined
+    const latestTimeInfo = formatLatestMessageTimeFromSeconds(resolvedLatestTs, nowTick)
+    const latestTimeState: { state: 'value'; text: string; title: string } | { state: 'loading' } | { state: 'na'; text: '--' } =
+      !canExport
+        ? (isSessionBindingPending ? { state: 'loading' } : { state: 'na', text: '--' })
+        : (typeof resolvedLatestTs === 'number' && resolvedLatestTs > 0
+          ? { state: 'value', text: latestTimeInfo.text, title: latestTimeInfo.title }
+          : { state: 'na', text: '--' })
     const messageCountState: { state: 'value'; text: string } | { state: 'loading' } | { state: 'na'; text: '--' } =
       !canExport
         ? (isSessionBindingPending ? { state: 'loading' } : { state: 'na', text: '--' })
@@ -8531,6 +8620,18 @@ function ExportPage() {
                 {openChatLabel}
               </button>
             )}
+          </div>
+          <div className="row-latest-time">
+            {latestTimeState.state === 'loading'
+              ? <Loader2 size={12} className="spin row-media-metric-icon" aria-label="最新消息时间加载中" />
+              : (
+                <span
+                  className={`row-latest-time-value ${latestTimeState.state === 'value' ? '' : 'muted'}`}
+                  title={latestTimeState.state === 'value' ? latestTimeState.title : undefined}
+                >
+                  {latestTimeState.text}
+                </span>
+              )}
           </div>
           <div className="row-media-metric">
             <strong className="row-media-metric-value">
@@ -9276,7 +9377,7 @@ function ExportPage() {
             <div className="export-defaults-modal-actions">
               <button
                 type="button"
-                className="secondary-btn"
+                className="secondary-btn export-defaults-close-action"
                 onClick={() => setIsExportDefaultsModalOpen(false)}
               >
                 关闭
@@ -9480,7 +9581,46 @@ function ExportPage() {
                             <span className="contacts-list-header-main-label">{contactsHeaderMainLabel}</span>
                           </span>
                         </span>
-                        <span className="contacts-list-header-count">总消息数</span>
+                        <button
+                          type="button"
+                          className={`contacts-list-header-count contacts-list-header-sortable ${contactsSortConfig.key === 'messageCount' ? 'is-active' : ''}`}
+                          onClick={() => toggleContactsSort('messageCount')}
+                          title={
+                            contactsSortConfig.key !== 'messageCount'
+                              ? '按总消息数降序排列'
+                              : contactsSortConfig.order === 'desc'
+                                ? '切换为按总消息数升序'
+                                : '取消排序（恢复默认）'
+                          }
+                        >
+                          <span>总消息数</span>
+                          {contactsSortConfig.key === 'messageCount'
+                            ? (contactsSortConfig.order === 'asc'
+                              ? <ArrowUp size={12} className="contacts-list-header-sort-icon" />
+                              : <ArrowDown size={12} className="contacts-list-header-sort-icon" />)
+                            : <ArrowUpDown size={12} className="contacts-list-header-sort-icon muted" />
+                          }
+                        </button>
+                        <button
+                          type="button"
+                          className={`contacts-list-header-latest-time contacts-list-header-sortable ${contactsSortConfig.key === 'latestMessageTime' ? 'is-active' : ''}`}
+                          onClick={() => toggleContactsSort('latestMessageTime')}
+                          title={
+                            contactsSortConfig.key !== 'latestMessageTime'
+                              ? '按最新消息时间降序排列'
+                              : contactsSortConfig.order === 'desc'
+                                ? '切换为按最新消息时间升序'
+                                : '取消排序（恢复默认）'
+                          }
+                        >
+                          <span>最新消息时间</span>
+                          {contactsSortConfig.key === 'latestMessageTime'
+                            ? (contactsSortConfig.order === 'asc'
+                              ? <ArrowUp size={12} className="contacts-list-header-sort-icon" />
+                              : <ArrowDown size={12} className="contacts-list-header-sort-icon" />)
+                            : <ArrowUpDown size={12} className="contacts-list-header-sort-icon muted" />
+                          }
+                        </button>
                         <span className="contacts-list-header-media">表情包</span>
                         <span className="contacts-list-header-media">语音</span>
                         <span className="contacts-list-header-media">图片</span>
