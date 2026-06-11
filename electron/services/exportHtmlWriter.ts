@@ -15,11 +15,12 @@ import {
 } from './exportServiceTypes'
 import { wcdbService } from './wcdbService'
 import { EXPORT_HTML_STYLES } from './exportHtmlStyles'
+import { exportHtmlViaRust, isRustExportAvailable, type RustMessage, type RustSession } from './nativeExport'
 
 type ExportServiceInstance = ExportWriterHost
 
 export const exportHtmlMixin = {
-  async exportSessionToHtml(this: ExportServiceInstance, 
+  async exportSessionToHtml(this: ExportServiceInstance,
     sessionId: string,
     outputPath: string,
     options: ExportOptions,
@@ -52,6 +53,13 @@ export const exportHtmlMixin = {
         currentSession: sessionInfo.displayName,
         phase: 'preparing'
       })
+
+      // TODO: 尝试使用 Rust 导出（当消息数量较大时）
+      // 目前 Rust HTML 导出尚未完全实现，保留 TypeScript 实现
+      // const USE_RUST_THRESHOLD = 1000 // 超过1000条消息时尝试Rust
+      // if (isRustExportAvailable() && options.useRust !== false) {
+      //   // 收集消息后尝试 Rust 导出
+      // }
 
       if (options.exportVoiceAsText) {
         await this.ensureVoiceModel(onProgress)

@@ -7393,6 +7393,50 @@ export class ExportService {
     return exportHtmlMixin.exportSessionToHtml.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
   }
 
+  /**
+   * 测试 Rust HTML 导出功能
+   * 用于验证 Rust 导出模块是否正常工作
+   */
+  async testRustHtmlExport(
+    messages: any[],
+    session: { id: string; nickname?: string; remark?: string; type: number; messageCount: number },
+    outputPath: string
+  ): Promise<{ success: boolean; durationMs: number; error?: string }> {
+    const { exportHtmlViaRust, isRustExportAvailable } = await import('./nativeExport')
+
+    if (!isRustExportAvailable()) {
+      return { success: false, durationMs: 0, error: 'Rust 导出模块不可用' }
+    }
+
+    try {
+      const result = await exportHtmlViaRust(
+        messages.map(m => ({
+          id: m.localId || m.id,
+          localId: m.localId || m.id,
+          serverId: m.serverId,
+          createTime: m.createTime,
+          type: m.type,
+          subType: m.subType,
+          isSender: m.isSender,
+          talker: m.talker,
+          content: m.content,
+          imagePath: m.imagePath,
+          voicePath: m.voicePath,
+          videoPath: m.videoPath,
+          filePath: m.filePath,
+          status: m.status,
+          msgSeq: m.msgSeq,
+        })),
+        session,
+        outputPath,
+        false // 不包含媒体（简化测试）
+      )
+      return result
+    } catch (e) {
+      return { success: false, durationMs: 0, error: String(e) }
+    }
+  }
+
   async exportSessions(...args: Parameters<typeof exportSessionsMixin.exportSessions>): ReturnType<typeof exportSessionsMixin.exportSessions> {
     return exportSessionsMixin.exportSessions.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
   }
