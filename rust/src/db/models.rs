@@ -34,6 +34,12 @@ pub struct Message {
     pub file_path: Option<String>, // 文件路径
     pub status: i32,          // 消息状态
     pub msg_seq: i64,         // 消息序列号
+    // 导出增强字段
+    pub display_name: Option<String>, // 发送者显示名称
+    pub group_nickname: Option<String>, // 群昵称
+    pub avatar_url: Option<String>, // 头像URL
+    pub reply_to_id: Option<i64>, // 引用消息ID
+    pub reply_to_content: Option<String>, // 引用消息内容
 }
 
 /// 联系人
