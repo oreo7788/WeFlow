@@ -1,11 +1,16 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Play, Pause, Volume2, VolumeX, RotateCcw } from 'lucide-react'
+import { toRenderableImageSrc } from './Chat/chatMessageUtils'
 import './VideoWindow.scss'
 
 export default function VideoWindow() {
     const [searchParams] = useSearchParams()
     const videoPath = searchParams.get('videoPath')
+    const videoSrc = useMemo(
+        () => (videoPath ? toRenderableImageSrc(videoPath) ?? videoPath : null),
+        [videoPath]
+    )
     const [isPlaying, setIsPlaying] = useState(false)
     const [isMuted, setIsMuted] = useState(false)
     const [currentTime, setCurrentTime] = useState(0)
@@ -94,7 +99,12 @@ export default function VideoWindow() {
         return () => window.removeEventListener('keydown', handleKeyDown)
     }, [togglePlay, toggleMute])
 
-    if (!videoPath) {
+    useEffect(() => {
+        setIsLoading(true)
+        setError(null)
+    }, [videoSrc])
+
+    if (!videoSrc) {
         return (
             <div className="video-window-empty">
                 <span>无效的视频路径</span>
@@ -123,7 +133,7 @@ export default function VideoWindow() {
                 )}
                 <video
                     ref={videoRef}
-                    src={videoPath}
+                    src={videoSrc}
                     onLoadedMetadata={(e) => {
                         const video = e.currentTarget
                         setDuration(video.duration)
