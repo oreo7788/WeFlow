@@ -1,6 +1,8 @@
 import { parentPort } from 'worker_threads'
 import { WcdbCore } from './services/wcdbCore'
 import { estimateJsonBytes, isPerfRecordingEnabled, logPerf, nowMs } from './utils/perfLogger'
+import { postWorkerResult } from './wcdbWorkerTransport'
+import { WcdbWorkerScheduler } from './wcdbWorkerScheduler'
 
 const core = new WcdbCore()
 
@@ -21,7 +23,7 @@ const WORKER_PERF_HOT_TYPES = new Set([
 
 if (parentPort) {
     let isShuttingDown = false
-    let messageChain = Promise.resolve()
+    const scheduler = new WcdbWorkerScheduler(4)
 
     const processMessage = async (msg: { id: number; type: string; payload: any }) => {
         const { id, type, payload } = msg
@@ -333,7 +335,7 @@ if (parentPort) {
                     result = { success: false, error: `Unknown method: ${type}` }
             }
 
-            parentPort!.postMessage({ id, result })
+            postWorkerResult(parentPort!, id, result)
             if (shouldLogWorkerPerf) {
                 logPerf('wcdbWorker', type, nowMs() - startedAt, {
                     payloadBytes: estimateJsonBytes(payload),
@@ -351,10 +353,8 @@ if (parentPort) {
     }
 
     parentPort.on('message', (msg) => {
-        messageChain = messageChain
-            .then(() => processMessage(msg))
-            .catch((error) => {
-                console.error('[wcdbWorker] Unhandled message error:', error)
-            })
+        scheduler.schedule(msg.type, () => processMessage(msg)).catch((error) => {
+            console.error('[wcdbWorker] Unhandled message error:', error)
+        })
     })
 }

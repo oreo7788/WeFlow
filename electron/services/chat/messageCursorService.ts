@@ -14,6 +14,8 @@ export class MessageCursorService {
   private messageCursorMutex = false
   private readonly messageBatchDefault = 50
   private readonly messageCursorSessionLimit = 8
+  private readonly nativeOffsetMaxProbeLimit = 500
+  private readonly cursorSkipBatchCap = 2000
   private readonly visibilityAnomalyLogWindowMs = 30000
   private readonly visibilityAnomalyLogBurst = 3
   private visibilityAnomalyLogState = new Map<string, { windowStart: number; total: number; suppressed: number }>()
@@ -88,6 +90,74 @@ export class MessageCursorService {
     return cursorResult
   }
 
+  private shouldPreferNativeOffsetPath(
+    offset: number,
+    startTime: number,
+    endTime: number,
+    ascending: boolean
+  ): boolean {
+    const safeOffset = Math.max(0, Math.floor(offset || 0))
+    return safeOffset > 0 && startTime === 0 && endTime === 0 && ascending !== true
+  }
+
+  private resolveCursorBatchSize(
+    requestLimit: number,
+    previousBatchSize: number | undefined,
+    offset: number,
+    startTime: number,
+    endTime: number,
+    ascending: boolean
+  ): number {
+    const base = Math.max(1, Math.floor(previousBatchSize || requestLimit || this.messageBatchDefault))
+    if (offset <= 0) return base
+    if (this.shouldPreferNativeOffsetPath(offset, startTime, endTime, ascending)) return base
+    return Math.max(base, Math.min(this.cursorSkipBatchCap, Math.floor(offset)))
+  }
+
+  private async getMessagesViaNativeOffset(
+    sessionId: string,
+    offset: number,
+    limit: number,
+    startedAt: number
+  ): Promise<{ success: boolean; messages?: Message[]; hasMore?: boolean; nextOffset?: number; error?: string }> {
+    const requestLimit = Math.max(1, Math.floor(limit || this.messageBatchDefault))
+    const stableResult = await this.getMessagesByOffsetStable(sessionId, offset, requestLimit, {
+      enrichQuotes: false
+    })
+    if (!stableResult.success || !Array.isArray(stableResult.messages)) {
+      logPerf('messageCursor', 'getMessages.nativeOffset.failed', nowMs() - startedAt, {
+        sessionId,
+        offset,
+        limit: requestLimit,
+        path: 'nativeOffset'
+      })
+      return { success: false, error: stableResult.error || '获取消息失败' }
+    }
+
+    this.messageCacheService.set(sessionId, stableResult.messages)
+    const nextOffset = Number.isFinite(stableResult.nextOffset)
+      ? Math.floor(stableResult.nextOffset as number)
+      : offset + stableResult.messages.length
+    logPerf('messageCursor', 'getMessages.nativeOffset', nowMs() - startedAt, {
+      sessionId,
+      offset,
+      limit: requestLimit,
+      rawRows: stableResult.rawRows || 0,
+      returned: stableResult.messages.length,
+      filteredOut: stableResult.filteredOut || 0,
+      nextOffset,
+      hasMore: stableResult.hasMore === true,
+      path: 'nativeOffset',
+      payloadBytes: estimateJsonBytes(stableResult.messages)
+    })
+    return {
+      success: true,
+      messages: stableResult.messages,
+      hasMore: stableResult.hasMore === true,
+      nextOffset
+    }
+  }
+
   async getMessages(
     sessionId: string,
     offset: number = 0,
@@ -126,6 +196,18 @@ export class MessageCursorService {
         mutexReleased = true
       }
 
+      if (this.shouldPreferNativeOffsetPath(offset, startTime, endTime, ascending)) {
+        await this.closeMessageCursorBySession(sessionId)
+        const nativeResult = await this.getMessagesViaNativeOffset(
+          sessionId,
+          offset,
+          requestLimit,
+          startedAt
+        )
+        releaseMessageCursorMutex?.()
+        return nativeResult
+      }
+
       let state = this.messageCursors.get(sessionId)
       if (state) {
         // refresh insertion order so Map iteration approximates LRU
@@ -159,7 +241,14 @@ export class MessageCursorService {
 
         // 创建新游标
         // 注意：WeFlow 数据库中的 create_time 是以秒为单位的
-        const cursorBatchSize = Math.max(1, Math.floor(state?.batchSize || requestLimit || this.messageBatchDefault))
+        const cursorBatchSize = this.resolveCursorBatchSize(
+          requestLimit,
+          state?.batchSize,
+          offset,
+          startTime,
+          endTime,
+          ascending
+        )
         const beginTimestamp = startTime > 10000000000 ? Math.floor(startTime / 1000) : startTime
         const endTimestamp = endTime > 10000000000 ? Math.floor(endTime / 1000) : endTime
         const cursorResult = await this.openListMessageCursor(sessionId, cursorBatchSize, ascending, beginTimestamp, endTimestamp)
@@ -299,6 +388,7 @@ export class MessageCursorService {
         filteredOut: collected.filteredOut || 0,
         nextOffset: state.fetched,
         hasMore,
+        path: 'cursor',
         payloadBytes: estimateJsonBytes(filtered)
       })
       return { success: true, messages: filtered, hasMore, nextOffset: state.fetched }
@@ -411,7 +501,8 @@ export class MessageCursorService {
   private async getMessagesByOffsetStable(
     sessionId: string,
     offset: number,
-    limit: number
+    limit: number,
+    options: { enrichQuotes?: boolean } = {}
   ): Promise<{
     success: boolean
     messages?: Message[]
@@ -424,7 +515,7 @@ export class MessageCursorService {
     const startedAt = nowMs()
     const pageLimit = Math.max(1, Math.floor(limit || this.messageBatchDefault))
     const safeOffset = Math.max(0, Math.floor(offset || 0))
-    const probeLimit = Math.min(500, pageLimit + 1)
+    const probeLimit = Math.min(this.nativeOffsetMaxProbeLimit, pageLimit + 1)
 
     const queryStartedAt = nowMs()
     const result = await wcdbService.getMessages(sessionId, probeLimit, safeOffset)
@@ -461,10 +552,13 @@ export class MessageCursorService {
     if (normalized.length > 0) {
       const enrichStartedAt = nowMs()
       await this.repairEmojiMessages(normalized)
-      await this.host.resolveQuotedMessages(normalized, sessionId)
+      if (options.enrichQuotes !== false) {
+        await this.host.resolveQuotedMessages(normalized, sessionId)
+      }
       logPerf('messageCursor', 'getMessagesByOffsetStable.enrich', nowMs() - enrichStartedAt, {
         sessionId,
-        messages: normalized.length
+        messages: normalized.length,
+        enrichQuotes: options.enrichQuotes !== false
       })
     }
 
@@ -478,6 +572,7 @@ export class MessageCursorService {
       returned: normalized.length,
       filteredOut: Math.max(0, mapped.length - visible.length),
       hasMore,
+      enrichQuotes: options.enrichQuotes !== false,
       payloadBytes: estimateJsonBytes(normalized)
     })
 

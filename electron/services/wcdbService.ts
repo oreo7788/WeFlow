@@ -1,6 +1,7 @@
 import { Worker } from 'worker_threads'
 import { join } from 'path'
 import { existsSync } from 'fs'
+import { decodeWorkerResult } from '../wcdbWorkerTransport'
 
 /**
  * Worker 消息接口
@@ -61,7 +62,7 @@ export class WcdbService {
         if (p) {
           this.pending.delete(id)
           if (error) p.reject(new Error(error))
-          else p.resolve(result)
+          else p.resolve(decodeWorkerResult(msg))
         }
       })
 
