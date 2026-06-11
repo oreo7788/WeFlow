@@ -7,11 +7,23 @@ import { voiceTranscribeService } from '../voiceTranscribeService'
 import { imageDecryptService } from '../imageDecryptService'
 import { LRUCache } from '../../utils/LRUCache.js'
 import { mapRowsToMessages } from './messageMapper'
-import { parseImageInfo } from './messageParsing'
-import { normalizeUnsignedIntegerToken } from './messageRowUtils'
+import { decodeMessageContent, parseImageDatNameFromRow, parseImageInfo } from './messageParsing'
+import { getRowInt, getRowTimestampSeconds, normalizeUnsignedIntegerToken } from './messageRowUtils'
+import { logPerf, nowMs } from '../../utils/perfLogger'
 import { loadSilkWasmModule, resolveSilkWasmFilePath } from '../silkWasmLoader'
 import type { Message, ResourceMessageItem, ResourceMessageType } from './types'
 import type { MediaAssetsHost } from './mediaAssetsHost'
+
+type ImageMessageCandidate = {
+  localId?: number
+  senderUsername?: string
+  imageMd5?: string
+  imageOriginSourceMd5?: string
+  imageDatName?: string
+  createTime?: number
+}
+
+const IMAGE_MESSAGES_PAGE_SIZE = 2000
 
 export class MediaAssetsService {
   private voiceWavCache: LRUCache<string, Buffer>
@@ -983,12 +995,112 @@ export class MediaAssetsService {
    * 获取某会话中有消息的日期列表
    * 返回 YYYY-MM-DD 格式的日期字符串数组
    */
+  private extractImageCandidatesFromRows(rows: Record<string, any>[]): ImageMessageCandidate[] {
+    const candidates: ImageMessageCandidate[] = []
+    for (const row of rows) {
+      const localType = getRowInt(row, ['local_type', 'localType'], 0)
+      if (localType !== 3) continue
+
+      const content = decodeMessageContent(row.message_content, row.compress_content)
+      const imageInfo = parseImageInfo(content)
+      const imageDatName = parseImageDatNameFromRow(row)
+      const imageMd5 = imageInfo.md5
+      const imageOriginSourceMd5 = imageInfo.originSourceMd5
+      if (!imageMd5 && !imageOriginSourceMd5 && !imageDatName) continue
+
+      const localId = getRowInt(row, ['local_id', 'localId'], 0)
+      const createTime = getRowTimestampSeconds(row, ['create_time', 'createTime'], 0)
+      candidates.push({
+        localId: localId > 0 ? localId : undefined,
+        senderUsername: String(row.sender_username || row.senderUsername || '').trim() || undefined,
+        imageMd5: imageMd5 || undefined,
+        imageOriginSourceMd5: imageOriginSourceMd5 || undefined,
+        imageDatName: imageDatName || undefined,
+        createTime: createTime > 0 ? createTime : undefined
+      })
+    }
+    return candidates
+  }
+
+  private dedupeImageCandidates(images: ImageMessageCandidate[]): ImageMessageCandidate[] {
+    const sorted = [...images].sort((a, b) => (b.createTime || 0) - (a.createTime || 0))
+    const seen = new Set<string>()
+    return sorted.filter((img) => {
+      const key = img.imageMd5 || img.imageOriginSourceMd5 || img.imageDatName || ''
+      if (!key || seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }
+
+  async getImageMessagesPage(
+    sessionId: string,
+    offset: number = 0,
+    limit: number = IMAGE_MESSAGES_PAGE_SIZE
+  ): Promise<{
+    success: boolean
+    images?: ImageMessageCandidate[]
+    hasMore?: boolean
+    nextOffset?: number
+    error?: string
+  }> {
+    const startedAt = nowMs()
+    try {
+      const connectResult = await this.host.ensureConnected()
+      if (!connectResult.success) {
+        return { success: false, error: connectResult.error || '数据库未连接' }
+      }
+
+      const pageLimit = Math.min(IMAGE_MESSAGES_PAGE_SIZE, Math.max(1, Math.floor(limit || IMAGE_MESSAGES_PAGE_SIZE)))
+      const safeOffset = Math.max(0, Math.floor(offset || 0))
+
+      const queryStartedAt = nowMs()
+      const result = await wcdbService.getMessagesByType(sessionId, 3, false, pageLimit, safeOffset)
+      const queryMs = nowMs() - queryStartedAt
+      if (!result.success || !Array.isArray(result.rows)) {
+        logPerf('mediaAssets', 'getImageMessagesPage.failed', nowMs() - startedAt, {
+          sessionId,
+          offset: safeOffset,
+          limit: pageLimit,
+          queryMs
+        })
+        return { success: false, error: result.error || '查询图片消息失败' }
+      }
+
+      const mapStartedAt = nowMs()
+      const images = this.extractImageCandidatesFromRows(result.rows as Record<string, any>[])
+      const mapMs = nowMs() - mapStartedAt
+      const rawRows = result.rows.length
+      const hasMore = rawRows >= pageLimit
+      const nextOffset = safeOffset + rawRows
+
+      logPerf('mediaAssets', 'getImageMessagesPage', nowMs() - startedAt, {
+        sessionId,
+        offset: safeOffset,
+        limit: pageLimit,
+        queryMs,
+        mapMs,
+        rawRows,
+        returned: images.length,
+        hasMore,
+        nextOffset
+      })
+
+      return { success: true, images, hasMore, nextOffset }
+    } catch (e) {
+      logPerf('mediaAssets', 'getImageMessagesPage.error', nowMs() - startedAt, { sessionId, offset, limit })
+      console.error('[ChatService] 分页获取图片消息失败:', e)
+      return { success: false, error: String(e) }
+    }
+  }
+
   /**
    * 获取某会话的全部图片消息（用于聊天页批量图片解密）
    */
   async getAllImageMessages(
     sessionId: string
-  ): Promise<{ success: boolean; images?: { localId?: number; senderUsername?: string; imageMd5?: string; imageOriginSourceMd5?: string; imageDatName?: string; createTime?: number }[]; error?: string }> {
+  ): Promise<{ success: boolean; images?: ImageMessageCandidate[]; error?: string }> {
+    const startedAt = nowMs()
     try {
       const connectResult = await this.host.ensureConnected()
       if (!connectResult.success) {
@@ -997,35 +1109,26 @@ export class MediaAssetsService {
 
       const result = await wcdbService.getMessagesByType(sessionId, 3, false, 0, 0)
       if (!result.success || !Array.isArray(result.rows)) {
+        logPerf('mediaAssets', 'getAllImageMessages.failed', nowMs() - startedAt, { sessionId })
         return { success: false, error: result.error || '查询图片消息失败' }
       }
 
-      const mapped = mapRowsToMessages(result.rows as Record<string, any>[], sessionId, String(this.host.getMyWxidCleaned() || '').trim())
-      let allImages: Array<{ localId?: number; senderUsername?: string; imageMd5?: string; imageOriginSourceMd5?: string; imageDatName?: string; createTime?: number }> = mapped
-        .filter(msg => msg.localType === 3)
-        .map(msg => ({
-          localId: msg.localId > 0 ? msg.localId : undefined,
-          senderUsername: msg.senderUsername || undefined,
-          imageMd5: msg.imageMd5 || undefined,
-          imageOriginSourceMd5: msg.imageOriginSourceMd5 || undefined,
-          imageDatName: msg.imageDatName || undefined,
-          createTime: msg.createTime || undefined
-        }))
-        .filter(img => Boolean(img.imageMd5 || img.imageOriginSourceMd5 || img.imageDatName))
+      const mapStartedAt = nowMs()
+      const allImages = this.dedupeImageCandidates(
+        this.extractImageCandidatesFromRows(result.rows as Record<string, any>[])
+      )
+      const mapMs = nowMs() - mapStartedAt
 
-      allImages.sort((a, b) => (b.createTime || 0) - (a.createTime || 0))
-
-      const seen = new Set<string>()
-      allImages = allImages.filter(img => {
-        const key = img.imageMd5 || img.imageOriginSourceMd5 || img.imageDatName || ''
-        if (!key || seen.has(key)) return false
-        seen.add(key)
-        return true
+      logPerf('mediaAssets', 'getAllImageMessages', nowMs() - startedAt, {
+        sessionId,
+        rawRows: result.rows.length,
+        returned: allImages.length,
+        mapMs
       })
-
       this.host.chatServiceLog(`共找到 ${allImages.length} 条图片消息（去重后）`)
       return { success: true, images: allImages }
     } catch (e) {
+      logPerf('mediaAssets', 'getAllImageMessages.error', nowMs() - startedAt, { sessionId })
       console.error('[ChatService] 获取全部图片消息失败:', e)
       return { success: false, error: String(e) }
     }

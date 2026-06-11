@@ -5473,24 +5473,102 @@ function ChatPage(props: ChatPageProps) {
       return
     }
 
-    const result = await window.electronAPI.chat.getAllImageMessages(currentSessionId)
-    if (!result.success || !result.images) {
-      alert(`获取图片消息失败: ${result.error || '未知错误'}`)
+    const sessionName = session.displayName || session.username || currentSessionId
+    const taskId = registerBackgroundTask({
+      sourcePage: 'chat',
+      title: '扫描图片消息',
+      detail: `正在扫描 ${sessionName} 的图片消息`,
+      progressText: '准备扫描',
+      cancelable: true
+    })
+
+    const IMAGE_PAGE_SIZE = 2000
+    const mergedImages: BatchImageDecryptCandidate[] = []
+    let offset = 0
+    let scanFailed = false
+
+    try {
+      while (true) {
+        if (isBackgroundTaskCancelRequested(taskId)) {
+          finishBackgroundTask(taskId, 'canceled', {
+            detail: '已取消图片扫描',
+            progressText: '已取消'
+          })
+          return
+        }
+
+        const result = await window.electronAPI.chat.getImageMessagesPage(
+          currentSessionId,
+          offset,
+          IMAGE_PAGE_SIZE
+        )
+        if (!result.success || !Array.isArray(result.images)) {
+          scanFailed = true
+          alert(`获取图片消息失败: ${result.error || '未知错误'}`)
+          finishBackgroundTask(taskId, 'failed', {
+            detail: result.error || '查询图片消息失败',
+            progressText: '扫描失败'
+          })
+          return
+        }
+
+        if (result.images.length > 0) {
+          mergedImages.push(...result.images)
+        }
+
+        updateBackgroundTask(taskId, {
+          detail: `已扫描 ${mergedImages.length} 条图片候选`,
+          progressText: result.hasMore ? '继续扫描...' : '扫描完成'
+        })
+
+        if (!result.hasMore) break
+        offset = Number.isFinite(result.nextOffset)
+          ? Math.max(0, Math.floor(result.nextOffset as number))
+          : offset + result.images.length
+      }
+    } catch (error) {
+      scanFailed = true
+      finishBackgroundTask(taskId, 'failed', {
+        detail: String(error),
+        progressText: '扫描失败'
+      })
+      alert(`获取图片消息失败: ${String(error)}`)
       return
     }
 
-    if (result.images.length === 0) {
+    if (scanFailed) return
+
+    const seen = new Set<string>()
+    const dedupedImages = mergedImages
+      .sort((a, b) => (b.createTime || 0) - (a.createTime || 0))
+      .filter((img) => {
+        const key = img.imageMd5 || img.imageOriginSourceMd5 || img.imageDatName || ''
+        if (!key || seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+
+    if (dedupedImages.length === 0) {
+      finishBackgroundTask(taskId, 'completed', {
+        detail: '当前会话没有可解密的图片消息',
+        progressText: '无图片'
+      })
       alert('当前会话没有图片消息')
       return
     }
 
+    finishBackgroundTask(taskId, 'completed', {
+      detail: `共找到 ${dedupedImages.length} 条图片消息（去重后）`,
+      progressText: '扫描完成'
+    })
+
     const dateSet = new Set<string>()
-    result.images.forEach((img: BatchImageDecryptCandidate) => {
+    dedupedImages.forEach((img: BatchImageDecryptCandidate) => {
       if (img.createTime) dateSet.add(new Date(img.createTime * 1000).toISOString().slice(0, 10))
     })
     const sortedDates = Array.from(dateSet).sort((a, b) => b.localeCompare(a))
 
-    setBatchImageMessages(result.images)
+    setBatchImageMessages(dedupedImages)
     setBatchImageDates(sortedDates)
     setBatchImageSelectedDates(new Set(sortedDates))
     setShowBatchDecryptConfirm(true)

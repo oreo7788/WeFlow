@@ -1271,6 +1271,27 @@ class ChatService {
     return this.mediaAssetsService.getAllImageMessages(sessionId)
   }
 
+  async getImageMessagesPage(
+    sessionId: string,
+    offset?: number,
+    limit?: number
+  ): Promise<{
+    success: boolean
+    images?: {
+      localId?: number
+      senderUsername?: string
+      imageMd5?: string
+      imageOriginSourceMd5?: string
+      imageDatName?: string
+      createTime?: number
+    }[]
+    hasMore?: boolean
+    nextOffset?: number
+    error?: string
+  }> {
+    return this.mediaAssetsService.getImageMessagesPage(sessionId, offset, limit)
+  }
+
   async getResourceMessages(options?: {
     sessionId?: string
     types?: ResourceMessageType[]

@@ -690,6 +690,24 @@ export interface ElectronAPI {
       }[]
       error?: string
     }>
+    getImageMessagesPage: (
+      sessionId: string,
+      offset?: number,
+      limit?: number
+    ) => Promise<{
+      success: boolean
+      images?: {
+        localId?: number
+        senderUsername?: string
+        imageMd5?: string
+        imageOriginSourceMd5?: string
+        imageDatName?: string
+        createTime?: number
+      }[]
+      hasMore?: boolean
+      nextOffset?: number
+      error?: string
+    }>
     getMessageDates: (sessionId: string) => Promise<{ success: boolean; dates?: string[]; error?: string }>
     getMessageDateCounts: (sessionId: string) => Promise<{ success: boolean; counts?: Record<string, number>; error?: string }>
     getResourceMessages: (options?: {

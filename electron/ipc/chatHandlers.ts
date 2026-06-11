@@ -323,6 +323,9 @@ export function registerChatHandlers(getConfigService: () => ConfigService | nul
   ipcMain.handle('chat:getAllImageMessages', async (_, sessionId: string) => {
     return chatService.getAllImageMessages(sessionId)
   })
+  ipcMain.handle('chat:getImageMessagesPage', async (_, sessionId: string, offset?: number, limit?: number) => {
+    return chatService.getImageMessagesPage(sessionId, offset, limit)
+  })
   ipcMain.handle('chat:getMessageDates', async (_, sessionId: string) => {
     return chatService.getMessageDates(sessionId)
   })
