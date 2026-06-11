@@ -15,7 +15,7 @@ import {
 } from './exportServiceTypes'
 import { wcdbService } from './wcdbService'
 import { EXPORT_HTML_STYLES } from './exportHtmlStyles'
-import { exportHtmlViaRust, isRustExportAvailable, type RustMessage, type RustSession } from './nativeExport'
+import { exportHtmlViaRust, isRustHtmlExportAvailable, type HtmlExportOptions } from './nativeExportHtml'
 
 type ExportServiceInstance = ExportWriterHost
 
@@ -53,13 +53,6 @@ export const exportHtmlMixin = {
         currentSession: sessionInfo.displayName,
         phase: 'preparing'
       })
-
-      // TODO: 尝试使用 Rust 导出（当消息数量较大时）
-      // 目前 Rust HTML 导出尚未完全实现，保留 TypeScript 实现
-      // const USE_RUST_THRESHOLD = 1000 // 超过1000条消息时尝试Rust
-      // if (isRustExportAvailable() && options.useRust !== false) {
-      //   // 收集消息后尝试 Rust 导出
-      // }
 
       if (options.exportVoiceAsText) {
         await this.ensureVoiceModel(onProgress)
@@ -114,6 +107,66 @@ export const exportHtmlMixin = {
         await this.mergeGroupMembers(sessionId, collected.memberSet, options.exportAvatars === true)
       }
       const sortedMessages = collected.rows
+
+      // 尝试使用 Rust 导出（当消息数量较大时）
+      const USE_RUST_THRESHOLD = 500 // 超过500条消息时尝试Rust
+      const ENABLE_RUST_HTML = process.env.WEFLOW_RUST_HTML !== '0' // 可通过环境变量禁用
+
+      if (ENABLE_RUST_HTML && isRustHtmlExportAvailable() && totalMessages >= USE_RUST_THRESHOLD) {
+        console.log(`[🔥 Rust HTML] 尝试使用 Rust 导出 ${totalMessages} 条消息...`)
+
+        const rustResult = await exportHtmlViaRust(
+          {
+            outputPath,
+            sessionId,
+            sessionName: sessionInfo.displayName,
+            includeMedia: options.exportImages !== false || options.exportVideos !== false,
+            includeAvatar: options.exportAvatars === true,
+            dateRange: options.dateRange || undefined,
+            exportImages: options.exportImages,
+            exportVideos: options.exportVideos,
+            exportVoices: options.exportVoices,
+            exportFiles: options.exportFiles,
+            maxFileSizeMb: options.maxFileSizeMb,
+          },
+          sortedMessages.map(msg => ({
+            id: msg.localId || msg.id,
+            localId: msg.localId,
+            serverId: msg.serverId,
+            createTime: msg.createTime,
+            type: msg.type,
+            subType: msg.subType,
+            isSender: msg.isSender || msg.senderUsername === cleanedMyWxid,
+            talker: msg.senderUsername || msg.talker,
+            content: msg.content,
+            imagePath: msg.imagePath,
+            voicePath: msg.voicePath,
+            videoPath: msg.videoPath,
+            filePath: msg.filePath,
+            fileName: msg.fileName,
+            fileSize: msg.fileSize,
+            status: msg.status,
+            msgSeq: msg.msgSeq,
+          })),
+          (progress) => {
+            onProgress?.({
+              current: progress.current,
+              total: 100,
+              currentSession: sessionInfo.displayName,
+              phase: progress.phase,
+              phaseProgress: progress.phase === 'exporting-media' ? progress.current : undefined,
+              phaseTotal: progress.phase === 'exporting-media' ? 100 : undefined,
+            } as ExportProgress)
+          }
+        )
+
+        if (rustResult.success) {
+          console.log(`[✅ Rust HTML] 导出成功! 耗时 ${rustResult.durationMs.toFixed(0)}ms, 导出 ${rustResult.exportedMediaCount} 个媒体文件`)
+          return { success: true }
+        } else {
+          console.warn(`[⚠️ Rust HTML] 导出失败: ${rustResult.error}, 回退到 TypeScript 实现`)
+        }
+      }
 
       const { exportMediaEnabled, mediaRootDir, mediaRelativePrefix } = this.getMediaLayout(outputPath, options)
       const mediaMessages = this.collectMediaMessagesForExport(sortedMessages, options)
