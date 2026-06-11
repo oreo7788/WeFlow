@@ -256,18 +256,32 @@ impl ImageDecryptService {
 }
 
 /// 解密数据（直接操作字节）
+/// 支持 DAT v1 (纯XOR) 和 DAT v2 (AES+XOR)
 #[napi]
 pub fn decrypt_image_data(
     data: Buffer,
     xor_key: Option<Buffer>,
+    aes_key: Option<Buffer>,
 ) -> napi::Result<Buffer> {
     let data = data.to_vec();
     
-    let key = match xor_key {
-        Some(k) => k.to_vec(),
-        None => return Err(napi::Error::new(napi::Status::InvalidArg, "需要 XOR 密钥")),
+    // 获取 XOR 密钥 (单字节)
+    let xor_key_byte = match xor_key {
+        Some(k) if !k.is_empty() => k[0],
+        _ => return Err(napi::Error::new(napi::Status::InvalidArg, "需要 XOR 密钥")),
     };
 
-    let decrypted = Decryptor::xor_decrypt(&data, &key);
+    // 获取 AES 密钥 (可选, 用于 DAT v2)
+    let aes_key_array = aes_key.and_then(|k| {
+        if k.len() >= 16 {
+            let mut arr = [0u8; 16];
+            arr.copy_from_slice(&k[..16]);
+            Some(arr)
+        } else {
+            None
+        }
+    });
+
+    let decrypted = Decryptor::decrypt_dat(&data, xor_key_byte, aes_key_array.as_ref());
     Ok(Buffer::from(decrypted))
 }

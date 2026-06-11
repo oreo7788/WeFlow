@@ -39,6 +39,7 @@ import { createLaunchAtStartupHelpers } from './app/launchAtStartup'
 import { createAutoUpdateHelpers, AUTO_UPDATE_ENABLED } from './app/autoUpdateHelpers'
 import { createSnsCacheMigrationRuntime } from './services/snsCacheMigration'
 import { deleteChatHistoryPayload } from './ipc/chatHistoryPayloadStore'
+import { isRustAvailable, getRustVersion } from './services/rustBridge'
 
 // 配置自动更新
 autoUpdater.autoDownload = false
@@ -1086,6 +1087,14 @@ function checkForUpdatesOnStartup() {
 }
 
 app.whenReady().then(async () => {
+  // 检测 Rust 模块加载状态
+  if (isRustAvailable()) {
+    const rustInfo = getRustVersion()
+    console.log('[Startup] Rust 核心模块已加载:', rustInfo)
+  } else {
+    console.log('[Startup] Rust 核心模块未加载，将使用 TypeScript 实现')
+  }
+
   // 先初始化配置，以便在启动早期判定是否需要静默启动
   configService = new ConfigService()
   autoUpdate.applyAutoUpdateChannel('startup')

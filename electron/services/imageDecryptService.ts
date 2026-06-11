@@ -1743,10 +1743,17 @@ export class ImageDecryptService {
     xorKey: number,
     aesKey?: string
   ): { data: Buffer; ext: string; isWxgf: boolean } | null {
+    const start = performance.now()
     try {
       const encrypted = readFileSync(datPath)
+      const fileName = datPath.split('/').pop() || 'unknown'
       const directExt = this.detectImageExtension(encrypted)
-      if (directExt) return { data: encrypted, ext: directExt, isWxgf: false }
+      if (directExt) {
+        console.log(`[✅ JS解密] ${fileName} -> 无需解密已是.${directExt}`)
+        return { data: encrypted, ext: directExt, isWxgf: false }
+      }
+
+      console.log(`[🔍 JS Debug] ${fileName}: 文件大小=${encrypted.length}, XOR密钥=0x${(xorKey & 0xFF).toString(16).padStart(2, '0')}, 文件前8字节=${encrypted.slice(0, 8).toString('hex')}`)
 
       const candidates: Buffer[] = []
       const aesKeyText = String(aesKey || '').trim()
@@ -1762,8 +1769,13 @@ export class ImageDecryptService {
 
       for (const candidate of candidates) {
         const ext = this.detectImageExtension(candidate)
-        if (ext) return { data: candidate, ext, isWxgf: false }
+        if (ext) {
+          const decryptMs = performance.now() - start
+          console.log(`[✅ JS解密] ${fileName} -> .${ext} (${encrypted.length}字节, ${decryptMs.toFixed(1)}ms), 解密后前8字节=${candidate.slice(0, 8).toString('hex')}`)
+          return { data: candidate, ext, isWxgf: false }
+        }
       }
+      console.log(`[❌ JS] 无法识别格式: ${fileName}, 解密后前8字节=${candidates[0]?.slice(0, 8).toString('hex') || '无数据'}`)
     } catch (error) {
       this.logError('JS DAT 解密 fallback 失败', error, { datPath })
     }

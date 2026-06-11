@@ -1,5 +1,35 @@
-import { existsSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
+
+// Rust 模块桥接
+let rustModule: any = null
+try {
+  // 计算 rust 模块路径
+  // 当前文件在 dist-electron/services/ 或 electron/services/
+  let rustPath: string
+  if (__dirname.includes('dist-electron')) {
+    // 打包后: dist-electron/services/ -> ../../rust
+    rustPath = join(__dirname, '..', '..', 'rust')
+  } else {
+    // 开发环境: electron/services/ -> ../../rust
+    rustPath = join(__dirname, '..', '..', 'rust')
+  }
+
+  // 检查路径是否存在
+  if (!existsSync(rustPath)) {
+    // 尝试从项目根目录找
+    const cwdRustPath = join(process.cwd(), 'rust')
+    if (existsSync(cwdRustPath)) {
+      rustPath = cwdRustPath
+    }
+  }
+
+  rustModule = require(rustPath)
+  console.log('[🔥 Rust] 核心模块加载成功! version=' + (rustModule.version?.() || 'unknown'))
+} catch (e) {
+  console.log('[🔥 Rust] 模块加载失败:', (e as Error).message)
+  // Rust 模块不可用
+}
 
 type NativeDecryptResult = {
   data: Buffer
@@ -107,22 +137,140 @@ export function nativeAddonLocation(): string | null {
   return null
 }
 
+/// 使用 Rust 模块解密
+function decryptDatViaRust(
+  inputPath: string,
+  xorKey: number,
+  _aesKey?: string
+): { data: Buffer; ext: string; isWxgf: boolean; meta: NativeDatMeta } | null {
+  if (!rustModule?.decryptImageData) return null
+
+  const fileName = inputPath.split('/').pop() || 'unknown'
+  const start = performance.now()
+  try {
+    // 读取文件
+    const fileData = readFileSync(inputPath)
+
+    // 创建 XOR 密钥 buffer（单字节）
+    const keyByte = xorKey & 0xFF
+    const keyBuffer = Buffer.from([keyByte])
+
+    // 创建 AES 密钥 buffer（如果有）
+    let aesKeyBuffer: Buffer | undefined = undefined
+    if (_aesKey && _aesKey.length >= 16) {
+      aesKeyBuffer = Buffer.from(_aesKey.slice(0, 16), 'ascii')
+    }
+
+    console.log(`[🔍 Debug] ${fileName}: 大小=${fileData.length}, XOR=0x${keyByte.toString(16).padStart(2, '0')}, AES=${aesKeyBuffer ? '有' : '无'}, 前8字节=${fileData.slice(0, 8).toString('hex')}`)
+
+    // 调用 Rust 解密（支持 DAT v2）
+    const decrypted = rustModule.decryptImageData(fileData, keyBuffer, aesKeyBuffer)
+    const decryptMs = performance.now() - start
+
+    if (!decrypted || !Buffer.isBuffer(decrypted)) {
+      console.log(`[❌ Rust] 返回无效数据: ${fileName}`)
+      return null
+    }
+
+    // 检测图片格式
+    const format = detectImageFormat(decrypted)
+    const decryptedHeader = decrypted.slice(0, 8).toString('hex')
+    if (!format) {
+      console.log(`[❌ Rust] 无法识别格式: ${fileName}, 解密后前8字节=${decryptedHeader}`)
+      return null
+    }
+
+    const ext = `.${format}`
+    console.log(`[✅ Rust解密] ${fileName} -> ${ext} (${fileData.length}字节, ${decryptMs.toFixed(1)}ms)`)
+
+    return {
+      data: decrypted,
+      ext,
+      isWxgf: false,
+      meta: {}
+    }
+  } catch (e) {
+    console.log(`[❌ Rust异常] ${fileName}: ${(e as Error).message}`)
+    return null
+  }
+}
+
+/// 检测图片格式
+function detectImageFormat(buffer: Buffer): string | null {
+  if (buffer.length < 8) return null
+
+  // JPEG: FF D8 FF
+  if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) {
+    return 'jpg'
+  }
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
+    return 'png'
+  }
+  // GIF: GIF87a or GIF89a
+  if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) {
+    return 'gif'
+  }
+  // WebP: RIFF....WEBP
+  if (buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 &&
+      buffer[8] === 0x57 && buffer[9] === 0x45 && buffer[10] === 0x42 && buffer[11] === 0x50) {
+    return 'webp'
+  }
+  // BMP: BM
+  if (buffer[0] === 0x42 && buffer[1] === 0x4D) {
+    return 'bmp'
+  }
+  // wxgf: wxgf
+  if (buffer[0] === 0x77 && buffer[1] === 0x78 && buffer[2] === 0x67 && buffer[3] === 0x66) {
+    return 'wxgf'
+  }
+
+  return null
+}
+
+let rustDecryptCount = 0
+let nativeDecryptCount = 0
+let jsDecryptCount = 0
+
 export function decryptDatViaNative(
   inputPath: string,
   xorKey: number,
   aesKey?: string
 ): { data: Buffer; ext: string; isWxgf: boolean; meta: NativeDatMeta } | null {
+  const fileName = inputPath.split('/').pop() || 'unknown'
+
+  // 优先尝试 Rust 模块
+  const rustResult = decryptDatViaRust(inputPath, xorKey, aesKey)
+  if (rustResult) {
+    rustDecryptCount++
+    console.log(`[✅ Rust成功 #${rustDecryptCount}] ${fileName} -> ${rustResult.ext}`)
+    return rustResult
+  }
+
+  // Rust 失败，记录原因
+  console.log(`[❌ Rust失败] ${fileName}, 尝试Native模块...`)
+
+  // 回退到传统原生模块
   const addon = loadAddon()
-  if (!addon) return null
+  if (!addon) {
+    jsDecryptCount++
+    console.log(`[⚠️ 无Native模块 #${jsDecryptCount}] ${fileName} -> 尝试JS解密`)
+    return null
+  }
 
   try {
     const result = addon.decryptDatNative(inputPath, xorKey, aesKey)
+    if (!result || !Buffer.isBuffer(result.data)) {
+      console.log(`[❌ Native失败] ${fileName} -> 无有效数据`)
+      return null
+    }
+    nativeDecryptCount++
     const isWxgf = Boolean(result?.isWxgf ?? result?.is_wxgf)
-    if (!result || !Buffer.isBuffer(result.data)) return null
     const rawExt = typeof result.ext === 'string' && result.ext.trim()
       ? result.ext.trim().toLowerCase()
       : ''
     const ext = rawExt ? (rawExt.startsWith('.') ? rawExt : `.${rawExt}`) : ''
+    console.log(`[✅ Native成功 #${nativeDecryptCount}] ${fileName} -> ${ext}${isWxgf ? '(wxgf)' : ''}`)
     const meta: NativeDatMeta = {
       version: result.version,
       aes_size: result.aes_size ?? result.aesSize,
@@ -131,7 +279,8 @@ export function decryptDatViaNative(
       flag: result.flag
     }
     return { data: result.data, ext, isWxgf, meta }
-  } catch {
+  } catch (e) {
+    console.log(`[❌ Native异常] ${fileName}: ${(e as Error).message}`)
     return null
   }
 }

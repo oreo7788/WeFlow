@@ -12,15 +12,29 @@ import path from 'path';
 let rustModule: any = null;
 
 try {
-  // 尝试加载本地构建的 Rust 模块
-  const rustPath = app.isPackaged 
-    ? path.join(process.resourcesPath, 'app.asar.unpacked', 'rust')
-    : path.join(__dirname, '..', '..', 'rust');
-  
+  // 计算 rust 模块路径
+  let rustPath: string;
+  if (app.isPackaged) {
+    // 生产环境：在 app.asar.unpacked 中
+    rustPath = path.join(process.resourcesPath, 'app.asar.unpacked', 'rust');
+  } else {
+    // 开发环境：从当前文件位置向上查找
+    // electron/services/ -> ../../rust 或 dist-electron/services/ -> ../../rust
+    rustPath = path.join(__dirname, '..', '..', 'rust');
+  }
+
+  // 如果路径不存在，尝试从 cwd 查找
+  if (!require('fs').existsSync(rustPath)) {
+    const cwdPath = path.join(process.cwd(), 'rust');
+    if (require('fs').existsSync(cwdPath)) {
+      rustPath = cwdPath;
+    }
+  }
+
   rustModule = require(rustPath);
-  console.log('[Rust Bridge] 成功加载 Rust 核心模块');
+  console.log('[Rust Bridge] 成功加载 Rust 核心模块，路径:', rustPath);
 } catch (e) {
-  console.warn('[Rust Bridge] 无法加载 Rust 模块，将使用 TypeScript 回退实现:', e);
+  console.warn('[Rust Bridge] 无法加载 Rust 模块，将使用 TypeScript 回退实现:', (e as Error).message);
   rustModule = null;
 }
 
