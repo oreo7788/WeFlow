@@ -833,6 +833,7 @@ export interface ElectronAPI {
       error?: string
     }>
     onWcdbChange: (callback: (event: unknown, data: { type: string; json: string }) => void) => () => void
+    onSessionsEnriched: (callback: (event: unknown, data: { sessions: ChatSession[] }) => void) => () => void
   }
   biz: {
     listAccounts: (account?: string) => Promise<any[]>

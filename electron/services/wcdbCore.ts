@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readdirSync, statSync, readFileSync } from 'fs'
 import * as fzstd from 'fzstd'
 import { expandHomePath } from '../utils/pathUtils'
 import { fileLogService } from '../utils/fileLogService'
+import { logPerf, nowMs } from '../utils/perfLogger'
 
 //数据服务初始化错误信息，用于帮助用户诊断问题
 let lastDllInitError: string | null = null
@@ -1673,8 +1674,10 @@ export class WcdbCore {
   }
 
   async getSessions(): Promise<{ success: boolean; sessions?: any[]; error?: string }> {
+    const startedAt = nowMs()
     if (!this.ensureReady()) {
       this.writeLog('getSessions skipped: not connected')
+      logPerf('wcdbCore', 'getSessions.notConnected', nowMs() - startedAt)
       return { success: false, error: 'WCDB 未连接' }
     }
     try {
@@ -1682,21 +1685,39 @@ export class WcdbCore {
       await new Promise(resolve => setImmediate(resolve))
 
       const outPtr = [null as any]
+      const nativeStartedAt = nowMs()
       const result = this.wcdbGetSessions(this.handle, outPtr)
+      const nativeMs = nowMs() - nativeStartedAt
 
       //数据服务调用后再次让出控制权
       await new Promise(resolve => setImmediate(resolve))
 
       if (result !== 0 || !outPtr[0]) {
         this.writeLog(`getSessions failed: code=${result}`)
+        logPerf('wcdbCore', 'getSessions.nativeFailed', nowMs() - startedAt, {
+          nativeMs,
+          result
+        })
         return { success: false, error: `获取会话失败: ${result}` }
       }
+      const decodeStartedAt = nowMs()
       const jsonStr = this.decodeJsonPtr(outPtr[0])
+      const decodeMs = nowMs() - decodeStartedAt
       if (!jsonStr) return { success: false, error: '解析会话失败' }
       this.writeLog(`getSessions ok size=${jsonStr.length}`)
+      const parseStartedAt = nowMs()
       const sessions = JSON.parse(jsonStr)
+      const parseMs = nowMs() - parseStartedAt
+      logPerf('wcdbCore', 'getSessions', nowMs() - startedAt, {
+        nativeMs,
+        decodeMs,
+        parseMs,
+        jsonBytes: jsonStr.length,
+        rows: Array.isArray(sessions) ? sessions.length : 0
+      })
       return { success: true, sessions }
     } catch (e) {
+      logPerf('wcdbCore', 'getSessions.error', nowMs() - startedAt)
       this.writeLog(`getSessions exception: ${String(e)}`)
       return { success: false, error: String(e) }
     }
@@ -1736,20 +1757,54 @@ export class WcdbCore {
   }
 
   async getMessages(sessionId: string, limit: number, offset: number): Promise<{ success: boolean; messages?: any[]; error?: string }> {
+    const startedAt = nowMs()
     if (!this.ensureReady()) {
+      logPerf('wcdbCore', 'getMessages.notConnected', nowMs() - startedAt, {
+        sessionId,
+        limit,
+        offset
+      })
       return { success: false, error: 'WCDB 未连接' }
     }
     try {
       const outPtr = [null as any]
+      const nativeStartedAt = nowMs()
       const result = this.wcdbGetMessages(this.handle, sessionId, limit, offset, outPtr)
+      const nativeMs = nowMs() - nativeStartedAt
       if (result !== 0 || !outPtr[0]) {
+        logPerf('wcdbCore', 'getMessages.nativeFailed', nowMs() - startedAt, {
+          sessionId,
+          limit,
+          offset,
+          nativeMs,
+          result
+        })
         return { success: false, error: `获取消息失败: ${result}` }
       }
+      const decodeStartedAt = nowMs()
       const jsonStr = this.decodeJsonPtr(outPtr[0])
+      const decodeMs = nowMs() - decodeStartedAt
       if (!jsonStr) return { success: false, error: '解析消息失败' }
+      const parseStartedAt = nowMs()
       const messages = this.parseMessageJson(jsonStr)
+      const parseMs = nowMs() - parseStartedAt
+      logPerf('wcdbCore', 'getMessages', nowMs() - startedAt, {
+        sessionId,
+        limit,
+        offset,
+        nativeMs,
+        decodeMs,
+        parseMs,
+        jsonBytes: jsonStr.length,
+        rows: Array.isArray(messages) ? messages.length : 0
+      })
       return { success: true, messages }
     } catch (e) {
+      logPerf('wcdbCore', 'getMessages.error', nowMs() - startedAt, {
+        sessionId,
+        limit,
+        offset
+      })
       return { success: false, error: String(e) }
     }
   }
@@ -4233,6 +4288,7 @@ export class WcdbCore {
   }
 
   async searchMessages(keyword: string, sessionId?: string, limit?: number, offset?: number, beginTimestamp?: number, endTimestamp?: number): Promise<{ success: boolean; messages?: any[]; error?: string }> {
+    const startedAt = nowMs()
     if (!this.ensureReady()) return { success: false, error: 'WCDB 未连接' }
     if (!this.wcdbSearchMessages) return { success: false, error: '当前数据服务版本不支持搜索消息' }
     try {
@@ -4240,6 +4296,7 @@ export class WcdbCore {
       await new Promise(resolve => setImmediate(resolve))
       if (handle === null || this.handle !== handle) return { success: false, error: '连接已断开' }
       const outPtr = [null as any]
+      const nativeStartedAt = nowMs()
       const result = this.wcdbSearchMessages(
         handle,
         sessionId || '',
@@ -4250,14 +4307,44 @@ export class WcdbCore {
         endTimestamp || 0,
         outPtr
       )
+      const nativeMs = nowMs() - nativeStartedAt
       if (result !== 0 || !outPtr[0]) {
+        logPerf('wcdbCore', 'searchMessages.nativeFailed', nowMs() - startedAt, {
+          keywordLength: keyword.length,
+          sessionId: sessionId || '',
+          limit: limit || 50,
+          offset: offset || 0,
+          nativeMs,
+          result
+        })
         return { success: false, error: `搜索消息失败: ${result}` }
       }
+      const decodeStartedAt = nowMs()
       const jsonStr = this.decodeJsonPtr(outPtr[0])
+      const decodeMs = nowMs() - decodeStartedAt
       if (!jsonStr) return { success: false, error: '解析搜索结果失败' }
+      const parseStartedAt = nowMs()
       const messages = this.parseMessageJson(jsonStr)
+      const parseMs = nowMs() - parseStartedAt
+      logPerf('wcdbCore', 'searchMessages', nowMs() - startedAt, {
+        keywordLength: keyword.length,
+        sessionId: sessionId || '',
+        limit: limit || 50,
+        offset: offset || 0,
+        nativeMs,
+        decodeMs,
+        parseMs,
+        jsonBytes: jsonStr.length,
+        rows: Array.isArray(messages) ? messages.length : 0
+      })
       return { success: true, messages }
     } catch (e) {
+      logPerf('wcdbCore', 'searchMessages.error', nowMs() - startedAt, {
+        keywordLength: keyword.length,
+        sessionId: sessionId || '',
+        limit: limit || 50,
+        offset: offset || 0
+      })
       return { success: false, error: String(e) }
     }
   }

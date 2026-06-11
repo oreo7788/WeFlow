@@ -309,6 +309,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onWcdbChange: (callback: (event: any, data: { type: string; json: string }) => void) => {
       ipcRenderer.on('wcdb-change', callback)
       return () => ipcRenderer.removeListener('wcdb-change', callback)
+    },
+    onSessionsEnriched: (callback: (event: any, data: { sessions: unknown[] }) => void) => {
+      const listener = (_event: unknown, data: { sessions: unknown[] }) => callback(_event, data)
+      ipcRenderer.on('sessions-enriched', listener)
+      return () => ipcRenderer.removeListener('sessions-enriched', listener)
     }
   },
 

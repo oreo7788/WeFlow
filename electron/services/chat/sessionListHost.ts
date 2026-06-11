@@ -15,4 +15,5 @@ export interface SessionListHost {
   seedMessageCountHint(username: string, messageCountHint: number | undefined): void
   setMessageCountHint(username: string, count: number): void
   getNewMessages(sessionId: string, minTime: number, limit: number): Promise<{ success: boolean; messages?: Message[]; error?: string }>
+  notifySessionsEnriched(sessions: ChatSession[]): void
 }

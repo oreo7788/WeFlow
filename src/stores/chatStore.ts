@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { QuotedMessageJumpTarget } from '../pages/Chat/messageBubbleTypes'
 import type { ChatSession, Message, Contact } from '../types/models'
+import { logPerf, nowMs } from '../utils/perfLogger'
 
 const messageAliasIndex = new Set<string>()
 
@@ -132,8 +133,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setFilteredSessions: (sessions) => set({ filteredSessions: sessions }),
 
   setCurrentSession: (sessionId, options) => set((state) => {
+    const startedAt = nowMs()
     const nextMessages = options?.preserveMessages ? state.messages : []
     rebuildMessageAliasIndex(nextMessages)
+    logPerf('chatStore', 'setCurrentSession', nowMs() - startedAt, {
+      sessionId: sessionId || '',
+      preserveMessages: options?.preserveMessages === true,
+      messageCount: nextMessages.length,
+      aliasCount: messageAliasIndex.size
+    })
     return {
       currentSessionId: sessionId,
       messages: nextMessages,
@@ -145,11 +153,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setLoadingSessions: (loading) => set({ isLoadingSessions: loading }),
 
   setMessages: (messages) => set(() => {
+    const startedAt = nowMs()
     rebuildMessageAliasIndex(messages || [])
+    logPerf('chatStore', 'setMessages', nowMs() - startedAt, {
+      messageCount: messages?.length || 0,
+      aliasCount: messageAliasIndex.size
+    })
     return { messages }
   }),
 
   appendMessages: (newMessages, prepend = false) => set((state) => {
+    const startedAt = nowMs()
     const currentMessages = state.messages || []
     if (messageAliasIndex.size === 0 && currentMessages.length > 0) {
       rebuildMessageAliasIndex(currentMessages)
@@ -172,7 +186,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     })
 
-    if (filtered.length === 0) return state
+    if (filtered.length === 0) {
+      logPerf('chatStore', 'appendMessages', nowMs() - startedAt, {
+        incomingCount: newMessages.length,
+        insertedCount: 0,
+        previousCount: currentMessages.length,
+        nextCount: currentMessages.length,
+        prepend,
+        aliasCount: messageAliasIndex.size
+      })
+      return state
+    }
+
+    const nextCount = currentMessages.length + filtered.length
+    logPerf('chatStore', 'appendMessages', nowMs() - startedAt, {
+      incomingCount: newMessages.length,
+      insertedCount: filtered.length,
+      previousCount: currentMessages.length,
+      nextCount,
+      prepend,
+      aliasCount: messageAliasIndex.size
+    })
 
     return {
       messages: prepend

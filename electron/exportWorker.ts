@@ -160,8 +160,6 @@ async function run() {
     isPackaged: config.isPackaged
   })
 
-  const onProgress = (progress: any) => queueProgress(progress)
-
   const taskControl = config.taskId
     ? {
         shouldPause: () => controlState.pauseRequested,

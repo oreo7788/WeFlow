@@ -3,9 +3,18 @@ import { getRowInt } from './messageRowUtils'
 import { cleanString, getMessageTypeLabel } from './messageParsing'
 import type { ChatSession, Message, SyntheticUnreadState } from './types'
 import type { SessionListHost } from './sessionListHost'
+import { logPerf, nowMs } from '../../utils/perfLogger'
 
 export class SessionListService {
   private syntheticUnreadState = new Map<string, SyntheticUnreadState>()
+  private readonly syntheticUnreadConcurrency = 4
+  private readonly syntheticUnreadDebounceMs = 250
+
+  private getSessionsInFlight: Promise<{ success: boolean; sessions?: ChatSession[]; error?: string }> | null = null
+  private enrichmentDebounceTimer: ReturnType<typeof setTimeout> | null = null
+  private enrichmentInFlight: Promise<void> | null = null
+  private enrichmentReschedule = false
+  private pendingEnrichmentSessions: ChatSession[] | null = null
 
   constructor(private readonly host: SessionListHost) {}
 
@@ -39,15 +48,45 @@ export class SessionListService {
   }
 
   async getSessions(): Promise<{ success: boolean; sessions?: ChatSession[]; error?: string }> {
+    if (this.getSessionsInFlight) {
+      logPerf('sessionList', 'getSessions.coalesced', 0)
+      return this.getSessionsInFlight
+    }
+
+    const task = this.buildSessionsFast()
+    this.getSessionsInFlight = task.finally(() => {
+      this.getSessionsInFlight = null
+    })
+
+    const result = await this.getSessionsInFlight
+    if (result.success && Array.isArray(result.sessions)) {
+      this.scheduleSyntheticUnreadEnrichment(result.sessions)
+    }
+    return result
+  }
+
+  private async buildSessionsFast(): Promise<{ success: boolean; sessions?: ChatSession[]; error?: string }> {
+    const startedAt = nowMs()
     try {
+      const connectStartedAt = nowMs()
       const connectResult = await this.host.ensureConnected()
+      const connectMs = nowMs() - connectStartedAt
       if (!connectResult.success) {
+        logPerf('sessionList', 'getSessions.connectFailed', nowMs() - startedAt, {
+          connectMs
+        })
         return { success: false, error: connectResult.error }
       }
       this.host.refreshSessionMessageCountCacheScope()
 
+      const queryStartedAt = nowMs()
       const result = await wcdbService.getSessions()
+      const queryMs = nowMs() - queryStartedAt
       if (!result.success || !result.sessions) {
+        logPerf('sessionList', 'getSessions.queryFailed', nowMs() - startedAt, {
+          connectMs,
+          queryMs
+        })
         return { success: false, error: result.error || '获取会话失败' }
       }
       const rows = result.sessions as Record<string, any>[]
@@ -60,6 +99,7 @@ export class SessionListService {
         return { success: false, error: `会话表异常: ${detail}${tableInfo}${tables}${columns}` }
       }
 
+      const openimStartedAt = nowMs()
       const openimLocalTypeMap = await this.host.loadContactLocalTypeMapForEnterpriseOpenim(rows.map((row) =>
         String(
           row.username ||
@@ -73,7 +113,9 @@ export class SessionListService {
           ''
         ).trim()
       ))
+      const openimMs = nowMs() - openimStartedAt
 
+      const transformStartedAt = nowMs()
       const sessions: ChatSession[] = []
       const now = Date.now()
       const myWxid = this.host.getMyWxidCleaned()
@@ -159,15 +201,104 @@ export class SessionListService {
         sessions.push(nextSession)
         this.host.seedMessageCountHint(username, messageCountHint)
       }
+      const transformMs = nowMs() - transformStartedAt
 
+      const officialStartedAt = nowMs()
       await this.addMissingOfficialSessions(sessions, myWxid)
-      await this.applySyntheticUnreadCounts(sessions)
+      const officialMs = nowMs() - officialStartedAt
+
+      const cachedSyntheticStartedAt = nowMs()
+      this.applyCachedSyntheticUnreadSnapshots(sessions)
+      const cachedSyntheticMs = nowMs() - cachedSyntheticStartedAt
+
+      const sortStartedAt = nowMs()
       sessions.sort((a, b) => Number(b.sortTimestamp || b.lastTimestamp || 0) - Number(a.sortTimestamp || a.lastTimestamp || 0))
+      const sortMs = nowMs() - sortStartedAt
+
+      logPerf('sessionList', 'getSessions', nowMs() - startedAt, {
+        rows: rows.length,
+        returned: sessions.length,
+        connectMs,
+        queryMs,
+        openimMs,
+        transformMs,
+        officialMs,
+        syntheticUnreadMs: 0,
+        cachedSyntheticMs,
+        syntheticUnreadDeferred: true,
+        sortMs
+      })
 
       return { success: true, sessions }
     } catch (e) {
+      logPerf('sessionList', 'getSessions.error', nowMs() - startedAt)
       console.error('ChatService: 获取会话列表失败:', e)
       return { success: false, error: String(e) }
+    }
+  }
+
+  private scheduleSyntheticUnreadEnrichment(sessions: ChatSession[]): void {
+    this.pendingEnrichmentSessions = sessions.map((session) => ({ ...session }))
+    if (this.enrichmentDebounceTimer) {
+      clearTimeout(this.enrichmentDebounceTimer)
+    }
+    this.enrichmentDebounceTimer = setTimeout(() => {
+      this.enrichmentDebounceTimer = null
+      void this.runSyntheticUnreadEnrichment()
+    }, this.syntheticUnreadDebounceMs)
+  }
+
+  private async runSyntheticUnreadEnrichment(): Promise<void> {
+    if (this.enrichmentInFlight) {
+      this.enrichmentReschedule = true
+      return
+    }
+
+    const sessions = this.pendingEnrichmentSessions
+    if (!sessions || sessions.length === 0) return
+
+    const startedAt = nowMs()
+    this.enrichmentInFlight = (async () => {
+      try {
+        await this.applySyntheticUnreadCounts(sessions)
+        sessions.sort((a, b) => Number(b.sortTimestamp || b.lastTimestamp || 0) - Number(a.sortTimestamp || a.lastTimestamp || 0))
+        logPerf('sessionList', 'enrichSyntheticUnread', nowMs() - startedAt, {
+          returned: sessions.length
+        })
+        this.host.notifySessionsEnriched(sessions)
+      } catch (error) {
+        console.warn('[ChatService] 后台公众号未读增强失败:', error)
+        logPerf('sessionList', 'enrichSyntheticUnread.error', nowMs() - startedAt)
+      }
+    })().finally(() => {
+      this.enrichmentInFlight = null
+      if (this.enrichmentReschedule) {
+        this.enrichmentReschedule = false
+        void this.runSyntheticUnreadEnrichment()
+      }
+    })
+
+    await this.enrichmentInFlight
+  }
+
+  private applyCachedSyntheticUnreadSnapshots(sessions: ChatSession[]): void {
+    for (const session of sessions) {
+      if (!this.shouldUseSyntheticUnread(session.username)) continue
+      const state = this.syntheticUnreadState.get(session.username)
+      if (!state) continue
+
+      if (state.summary) {
+        session.summary = state.summary
+        session.lastMsgType = Number(state.lastMsgType || session.lastMsgType || 0)
+      }
+      session.unreadCount = Math.max(Number(session.unreadCount || 0), state.unreadCount)
+      if (state.latestTimestamp > 0) {
+        session.lastTimestamp = Math.max(Number(session.lastTimestamp || 0), state.latestTimestamp)
+        session.sortTimestamp = Math.max(Number(session.sortTimestamp || 0), state.latestTimestamp)
+      }
+      if (state.summaryTimestamp && state.summaryTimestamp > 0) {
+        session.sortTimestamp = Math.max(Number(session.sortTimestamp || 0), state.summaryTimestamp)
+      }
     }
   }
 
@@ -246,84 +377,94 @@ export class SessionListService {
     const candidates = sessions.filter((session) => this.shouldUseSyntheticUnread(session.username))
     if (candidates.length === 0) return
 
-    for (const session of candidates) {
-      try {
-        const snapshot = await this.getSessionMessageStatsSnapshot(session.username)
-        const latestTimestamp = Math.max(
-          Number(session.lastTimestamp || 0),
-          Number(session.sortTimestamp || 0),
-          snapshot.latestTimestamp
-        )
-        if (latestTimestamp > 0) {
-          session.lastTimestamp = latestTimestamp
-          session.sortTimestamp = Math.max(Number(session.sortTimestamp || 0), latestTimestamp)
-        }
-        if (snapshot.total > 0) {
-          session.messageCountHint = Math.max(Number(session.messageCountHint || 0), snapshot.total)
-          this.host.setMessageCountHint(session.username, session.messageCountHint)
-        }
-
-        let state = this.syntheticUnreadState.get(session.username)
-        if (!state) {
-          const initialUnread = await this.getInitialSyntheticUnreadState(session.username, latestTimestamp)
-          state = {
-            readTimestamp: latestTimestamp,
-            scannedTimestamp: latestTimestamp,
-            latestTimestamp,
-            unreadCount: initialUnread.count
-          }
-          if (initialUnread.latestMessage) {
-            state.summary = this.getSessionSummaryFromMessage(initialUnread.latestMessage)
-            state.summaryTimestamp = Number(initialUnread.latestMessage.createTime || latestTimestamp)
-            state.lastMsgType = Number(initialUnread.latestMessage.localType || 0)
-          }
-          this.syntheticUnreadState.set(session.username, state)
-        }
-
-        let latestMessageForSummary: Message | undefined
-        if (latestTimestamp > state.scannedTimestamp) {
-          const newMessagesResult = await this.host.getNewMessages(
-            session.username,
-            Math.max(0, state.scannedTimestamp),
-            1000
-          )
-          if (newMessagesResult.success && Array.isArray(newMessagesResult.messages)) {
-            let nextUnread = state.unreadCount
-            let nextScannedTimestamp = state.scannedTimestamp
-            for (const message of newMessagesResult.messages) {
-              const createTime = Number(message.createTime || 0)
-              if (!Number.isFinite(createTime) || createTime <= state.scannedTimestamp) continue
-              if (message.isSend === 1) continue
-              nextUnread += 1
-              latestMessageForSummary = message
-              if (createTime > nextScannedTimestamp) {
-                nextScannedTimestamp = Math.floor(createTime)
-              }
-            }
-            state.unreadCount = nextUnread
-            state.scannedTimestamp = Math.max(nextScannedTimestamp, latestTimestamp)
-          } else {
-            state.scannedTimestamp = latestTimestamp
-          }
-        }
-
-        state.latestTimestamp = Math.max(state.latestTimestamp, latestTimestamp)
-        if (latestMessageForSummary) {
-          const summary = this.getSessionSummaryFromMessage(latestMessageForSummary)
-          if (summary) {
-            state.summary = summary
-            state.summaryTimestamp = Number(latestMessageForSummary.createTime || latestTimestamp)
-            state.lastMsgType = Number(latestMessageForSummary.localType || 0)
-          }
-        }
-        if (state.summary) {
-          session.summary = state.summary
-          session.lastMsgType = Number(state.lastMsgType || session.lastMsgType || 0)
-        }
-        session.unreadCount = Math.max(Number(session.unreadCount || 0), state.unreadCount)
-      } catch (error) {
-        console.warn(`[ChatService] 合成公众号未读失败: ${session.username}`, error)
+    let nextIndex = 0
+    const workerCount = Math.min(this.syntheticUnreadConcurrency, candidates.length)
+    await Promise.all(Array.from({ length: workerCount }, async () => {
+      while (nextIndex < candidates.length) {
+        const session = candidates[nextIndex]
+        nextIndex += 1
+        await this.applySyntheticUnreadCount(session)
       }
+    }))
+  }
+
+  private async applySyntheticUnreadCount(session: ChatSession): Promise<void> {
+    try {
+      const snapshot = await this.getSessionMessageStatsSnapshot(session.username)
+      const latestTimestamp = Math.max(
+        Number(session.lastTimestamp || 0),
+        Number(session.sortTimestamp || 0),
+        snapshot.latestTimestamp
+      )
+      if (latestTimestamp > 0) {
+        session.lastTimestamp = latestTimestamp
+        session.sortTimestamp = Math.max(Number(session.sortTimestamp || 0), latestTimestamp)
+      }
+      if (snapshot.total > 0) {
+        session.messageCountHint = Math.max(Number(session.messageCountHint || 0), snapshot.total)
+        this.host.setMessageCountHint(session.username, session.messageCountHint)
+      }
+
+      let state = this.syntheticUnreadState.get(session.username)
+      if (!state) {
+        const initialUnread = await this.getInitialSyntheticUnreadState(session.username, latestTimestamp)
+        state = {
+          readTimestamp: latestTimestamp,
+          scannedTimestamp: latestTimestamp,
+          latestTimestamp,
+          unreadCount: initialUnread.count
+        }
+        if (initialUnread.latestMessage) {
+          state.summary = this.getSessionSummaryFromMessage(initialUnread.latestMessage)
+          state.summaryTimestamp = Number(initialUnread.latestMessage.createTime || latestTimestamp)
+          state.lastMsgType = Number(initialUnread.latestMessage.localType || 0)
+        }
+        this.syntheticUnreadState.set(session.username, state)
+      }
+
+      let latestMessageForSummary: Message | undefined
+      if (latestTimestamp > state.scannedTimestamp) {
+        const newMessagesResult = await this.host.getNewMessages(
+          session.username,
+          Math.max(0, state.scannedTimestamp),
+          1000
+        )
+        if (newMessagesResult.success && Array.isArray(newMessagesResult.messages)) {
+          let nextUnread = state.unreadCount
+          let nextScannedTimestamp = state.scannedTimestamp
+          for (const message of newMessagesResult.messages) {
+            const createTime = Number(message.createTime || 0)
+            if (!Number.isFinite(createTime) || createTime <= state.scannedTimestamp) continue
+            if (message.isSend === 1) continue
+            nextUnread += 1
+            latestMessageForSummary = message
+            if (createTime > nextScannedTimestamp) {
+              nextScannedTimestamp = Math.floor(createTime)
+            }
+          }
+          state.unreadCount = nextUnread
+          state.scannedTimestamp = Math.max(nextScannedTimestamp, latestTimestamp)
+        } else {
+          state.scannedTimestamp = latestTimestamp
+        }
+      }
+
+      state.latestTimestamp = Math.max(state.latestTimestamp, latestTimestamp)
+      if (latestMessageForSummary) {
+        const summary = this.getSessionSummaryFromMessage(latestMessageForSummary)
+        if (summary) {
+          state.summary = summary
+          state.summaryTimestamp = Number(latestMessageForSummary.createTime || latestTimestamp)
+          state.lastMsgType = Number(latestMessageForSummary.localType || 0)
+        }
+      }
+      if (state.summary) {
+        session.summary = state.summary
+        session.lastMsgType = Number(state.lastMsgType || session.lastMsgType || 0)
+      }
+      session.unreadCount = Math.max(Number(session.unreadCount || 0), state.unreadCount)
+    } catch (error) {
+      console.warn(`[ChatService] 合成公众号未读失败: ${session.username}`, error)
     }
   }
 

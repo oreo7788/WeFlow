@@ -287,17 +287,6 @@ const getPlatformIconName = (): string => {
   return 'icon.ico'
 }
 
-const resolveAppIconPath = (): string => {
-  const iconName = getPlatformIconName()
-  if (!process.env.VITE_DEV_SERVER_URL) {
-    return join(process.resourcesPath, iconName)
-  }
-  if (process.platform === 'darwin') {
-    return join(__dirname, '../resources/icons/macos/icon.icns')
-  }
-  return join(__dirname, `../public/${iconName}`)
-}
-
 const requestMainWindowCloseConfirmation = (win: BrowserWindow): void => {
   if (isClosePromptVisible) return
   isClosePromptVisible = true

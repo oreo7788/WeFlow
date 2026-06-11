@@ -7,6 +7,7 @@ import { mapRowsToMessages } from './messageMapper'
 import { normalizeMessageOrder } from './messageRowUtils'
 import type { Message } from './types'
 import type { MessageCursorHost } from './messageCursorHost'
+import { logPerf, nowMs } from '../../utils/perfLogger'
 
 export class MessageCursorService {
   private messageCursors: Map<string, { cursor: number; fetched: number; batchSize: number; startTime?: number; endTime?: number; ascending?: boolean; bufferedMessages?: any[] }> = new Map()
@@ -65,10 +66,19 @@ export class MessageCursorService {
     endTime: number = 0,
     ascending: boolean = false
   ): Promise<{ success: boolean; messages?: Message[]; hasMore?: boolean; nextOffset?: number; error?: string }> {
+    const startedAt = nowMs()
     let releaseMessageCursorMutex: (() => void) | null = null
     try {
       const connectResult = await this.host.ensureConnected()
       if (!connectResult.success) {
+        logPerf('messageCursor', 'getMessages.connectFailed', nowMs() - startedAt, {
+          sessionId,
+          offset,
+          limit,
+          startTime,
+          endTime,
+          ascending
+        })
         return { success: false, error: connectResult.error || '数据库未连接' }
       }
 
@@ -247,8 +257,29 @@ export class MessageCursorService {
       this.host.chatServiceLog(
         `getMessages session=${sessionId} rawRowsConsumed=${rawRowsConsumed} visibleMessagesReturned=${filtered.length} filteredOut=${collected.filteredOut || 0} nextOffset=${state.fetched} hasMore=${hasMore}`
       )
+      logPerf('messageCursor', 'getMessages', nowMs() - startedAt, {
+        sessionId,
+        offset,
+        limit: requestLimit,
+        startTime,
+        endTime,
+        ascending,
+        rawRowsConsumed,
+        returned: filtered.length,
+        filteredOut: collected.filteredOut || 0,
+        nextOffset: state.fetched,
+        hasMore
+      })
       return { success: true, messages: filtered, hasMore, nextOffset: state.fetched }
     } catch (e) {
+      logPerf('messageCursor', 'getMessages.error', nowMs() - startedAt, {
+        sessionId,
+        offset,
+        limit,
+        startTime,
+        endTime,
+        ascending
+      })
       console.error('ChatService: 获取消息失败:', e)
       return { success: false, error: String(e) }
     } finally {
@@ -359,12 +390,21 @@ export class MessageCursorService {
     filteredOut?: number
     error?: string
   }> {
+    const startedAt = nowMs()
     const pageLimit = Math.max(1, Math.floor(limit || this.messageBatchDefault))
     const safeOffset = Math.max(0, Math.floor(offset || 0))
     const probeLimit = Math.min(500, pageLimit + 1)
 
+    const queryStartedAt = nowMs()
     const result = await wcdbService.getMessages(sessionId, probeLimit, safeOffset)
+    const queryMs = nowMs() - queryStartedAt
     if (!result.success || !Array.isArray(result.messages)) {
+      logPerf('messageCursor', 'getMessagesByOffsetStable.failed', nowMs() - startedAt, {
+        sessionId,
+        offset: safeOffset,
+        limit: pageLimit,
+        queryMs
+      })
       return { success: false, error: result.error || '获取消息失败' }
     }
 
@@ -381,9 +421,25 @@ export class MessageCursorService {
     }
     const normalized = normalizeMessageOrder(outputMessages)
     if (normalized.length > 0) {
+      const enrichStartedAt = nowMs()
       await this.repairEmojiMessages(normalized)
       await this.host.resolveQuotedMessages(normalized, sessionId)
+      logPerf('messageCursor', 'getMessagesByOffsetStable.enrich', nowMs() - enrichStartedAt, {
+        sessionId,
+        messages: normalized.length
+      })
     }
+
+    logPerf('messageCursor', 'getMessagesByOffsetStable', nowMs() - startedAt, {
+      sessionId,
+      offset: safeOffset,
+      limit: pageLimit,
+      queryMs,
+      rawRows: selectedRows.length,
+      returned: normalized.length,
+      filteredOut: Math.max(0, mapped.length - visible.length),
+      hasMore
+    })
 
     return {
       success: true,
@@ -397,9 +453,14 @@ export class MessageCursorService {
 
 
   async getLatestMessages(sessionId: string, limit: number = this.messageBatchDefault): Promise<{ success: boolean; messages?: Message[]; hasMore?: boolean; nextOffset?: number; error?: string }> {
+    const startedAt = nowMs()
     try {
       const connectResult = await this.host.ensureConnected()
       if (!connectResult.success) {
+        logPerf('messageCursor', 'getLatestMessages.connectFailed', nowMs() - startedAt, {
+          sessionId,
+          limit
+        })
         return { success: false, error: connectResult.error || '数据库未连接' }
       }
 
@@ -412,6 +473,15 @@ export class MessageCursorService {
       this.host.chatServiceLog(
         `getLatestMessages(stable) session=${sessionId} rawRows=${stableResult.rawRows || 0} visibleMessagesReturned=${stableResult.messages.length} filteredOut=${stableResult.filteredOut || 0} nextOffset=${stableResult.nextOffset || 0} hasMore=${stableResult.hasMore === true}`
       )
+      logPerf('messageCursor', 'getLatestMessages', nowMs() - startedAt, {
+        sessionId,
+        limit,
+        rawRows: stableResult.rawRows || 0,
+        returned: stableResult.messages.length,
+        filteredOut: stableResult.filteredOut || 0,
+        nextOffset: stableResult.nextOffset || 0,
+        hasMore: stableResult.hasMore === true
+      })
       return {
         success: true,
         messages: stableResult.messages,
@@ -421,6 +491,10 @@ export class MessageCursorService {
           : stableResult.messages.length
       }
     } catch (e) {
+      logPerf('messageCursor', 'getLatestMessages.error', nowMs() - startedAt, {
+        sessionId,
+        limit
+      })
       console.error('ChatService: 获取最新消息失败:', e)
       return { success: false, error: String(e) }
     }

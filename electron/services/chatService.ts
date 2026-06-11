@@ -225,8 +225,18 @@ class ChatService {
       seedMessageCountHint: (username, messageCountHint) =>
         this.sessionDetailService.seedMessageCountHint(username, messageCountHint),
       setMessageCountHint: (username, count) => this.sessionDetailService.setMessageCountHint(username, count),
-      getNewMessages: (sessionId, minTime, limit) => this.getNewMessages(sessionId, minTime, limit)
+      getNewMessages: (sessionId, minTime, limit) => this.getNewMessages(sessionId, minTime, limit),
+      notifySessionsEnriched: (sessions) => this.broadcastSessionsEnriched(sessions)
     }
+  }
+
+  private broadcastSessionsEnriched(sessions: ChatSession[]): void {
+    const windows = BrowserWindow.getAllWindows()
+    windows.forEach((win) => {
+      if (!win.isDestroyed()) {
+        win.webContents.send('sessions-enriched', { sessions })
+      }
+    })
   }
 
   private createSessionDetailHost(): SessionDetailHost {
@@ -1218,14 +1228,6 @@ class ChatService {
   ): Promise<{ success: boolean; hasCache: boolean; data?: string }> {
     return this.mediaAssetsService.resolveVoiceCache(sessionId, msgId)
   }
-      // 在 worker 环境中使用 createRequire 来正确加载模块
-      const requireFromApp = createRequire(join(appPath, 'package.json'))
-      const silkWasm = requireFromApp('silk-wasm')
-      if (!silkWasm || !silkWasm.decode) {
-        console.error('[ChatService][Voice] silk-wasm module invalid')
-        return null
-      }
-
   async getVoiceData_Legacy(
     sessionId: string,
     msgId: string
