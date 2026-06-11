@@ -3,11 +3,11 @@ import { existsSync } from 'fs'
 import { wcdbService } from '../wcdbService'
 import { MessageCacheService } from '../messageCacheService'
 import { emojiCache } from './constants'
-import { mapRowsToMessages } from './messageMapper'
+import { mapRowsToMessagesForList } from './messageMapper'
 import { normalizeMessageOrder } from './messageRowUtils'
 import type { Message } from './types'
 import type { MessageCursorHost } from './messageCursorHost'
-import { logPerf, nowMs } from '../../utils/perfLogger'
+import { logPerf, nowMs, estimateJsonBytes } from '../../utils/perfLogger'
 
 export class MessageCursorService {
   private messageCursors: Map<string, { cursor: number; fetched: number; batchSize: number; startTime?: number; endTime?: number; ascending?: boolean; bufferedMessages?: any[] }> = new Map()
@@ -56,6 +56,36 @@ export class MessageCursorService {
         }
       })
     )
+  }
+
+  private async openListMessageCursor(
+    sessionId: string,
+    batchSize: number,
+    ascending: boolean,
+    beginTimestamp: number,
+    endTimestamp: number
+  ): Promise<{ success: boolean; cursor?: number; error?: string; mode?: 'lite' | 'full' }> {
+    const startedAt = nowMs()
+    const cursorResult = await wcdbService.openListMessageCursor(
+      sessionId,
+      batchSize,
+      ascending,
+      beginTimestamp,
+      endTimestamp
+    )
+    logPerf('messageCursor', 'openListMessageCursor', nowMs() - startedAt, {
+      sessionId,
+      batchSize,
+      ascending,
+      beginTimestamp,
+      endTimestamp,
+      mode: cursorResult.mode || 'full',
+      success: cursorResult.success === true
+    })
+    if (cursorResult.success && cursorResult.mode === 'full') {
+      console.warn(`[ChatService] 聊天列表已回退标准游标: session=${sessionId}`)
+    }
+    return cursorResult
   }
 
   async getMessages(
@@ -132,7 +162,7 @@ export class MessageCursorService {
         const cursorBatchSize = Math.max(1, Math.floor(state?.batchSize || requestLimit || this.messageBatchDefault))
         const beginTimestamp = startTime > 10000000000 ? Math.floor(startTime / 1000) : startTime
         const endTimestamp = endTime > 10000000000 ? Math.floor(endTime / 1000) : endTime
-        const cursorResult = await wcdbService.openMessageCursor(sessionId, cursorBatchSize, ascending, beginTimestamp, endTimestamp)
+        const cursorResult = await this.openListMessageCursor(sessionId, cursorBatchSize, ascending, beginTimestamp, endTimestamp)
         if (!cursorResult.success || !cursorResult.cursor) {
           console.error('[ChatService] 打开消息游标失败:', cursorResult.error)
           return { success: false, error: cursorResult.error || '打开消息游标失败' }
@@ -268,7 +298,8 @@ export class MessageCursorService {
         returned: filtered.length,
         filteredOut: collected.filteredOut || 0,
         nextOffset: state.fetched,
-        hasMore
+        hasMore,
+        payloadBytes: estimateJsonBytes(filtered)
       })
       return { success: true, messages: filtered, hasMore, nextOffset: state.fetched }
     } catch (e) {
@@ -411,7 +442,14 @@ export class MessageCursorService {
     const rawRows = result.messages as Record<string, any>[]
     const hasMore = rawRows.length > pageLimit
     const selectedRows = hasMore ? rawRows.slice(0, pageLimit) : rawRows
-    const mapped = mapRowsToMessages(selectedRows, sessionId, String(this.host.getMyWxidCleaned() || '').trim())
+    const mapStartedAt = nowMs()
+    const mapped = mapRowsToMessagesForList(selectedRows, sessionId, String(this.host.getMyWxidCleaned() || '').trim())
+    logPerf('messageCursor', 'mapRowsToMessagesForList', nowMs() - mapStartedAt, {
+      sessionId,
+      rows: selectedRows.length,
+      mapped: mapped.length
+    })
+    const mapMs = nowMs() - mapStartedAt
     const visible = mapped.filter((msg) => this.isMessageVisibleForSession(sessionId, msg))
     const outputMessages = (visible.length === 0 && mapped.length > 0)
       ? mapped
@@ -435,10 +473,12 @@ export class MessageCursorService {
       offset: safeOffset,
       limit: pageLimit,
       queryMs,
+      mapMs,
       rawRows: selectedRows.length,
       returned: normalized.length,
       filteredOut: Math.max(0, mapped.length - visible.length),
-      hasMore
+      hasMore,
+      payloadBytes: estimateJsonBytes(normalized)
     })
 
     return {
@@ -480,7 +520,8 @@ export class MessageCursorService {
         returned: stableResult.messages.length,
         filteredOut: stableResult.filteredOut || 0,
         nextOffset: stableResult.nextOffset || 0,
-        hasMore: stableResult.hasMore === true
+        hasMore: stableResult.hasMore === true,
+        payloadBytes: estimateJsonBytes(stableResult.messages)
       })
       return {
         success: true,
@@ -513,7 +554,7 @@ export class MessageCursorService {
       }
 
       // 转换为 Message 对象
-      const messages = mapRowsToMessages(res.messages as Record<string, any>[], sessionId, String(this.host.getMyWxidCleaned() || '').trim())
+      const messages = mapRowsToMessagesForList(res.messages as Record<string, any>[], sessionId, String(this.host.getMyWxidCleaned() || '').trim())
       const normalized = normalizeMessageOrder(messages)
 
       // 并发检查并修复缺失 CDN URL 的表情包
@@ -639,7 +680,13 @@ export class MessageCursorService {
 
       const rowsToProcess = queuedRows
       queuedRows = []
-      const mappedMessages = mapRowsToMessages(rowsToProcess, sessionId, String(this.host.getMyWxidCleaned() || '').trim())
+      const mapStartedAt = nowMs()
+      const mappedMessages = mapRowsToMessagesForList(rowsToProcess, sessionId, String(this.host.getMyWxidCleaned() || '').trim())
+      logPerf('messageCursor', 'mapRowsToMessagesForList', nowMs() - mapStartedAt, {
+        sessionId,
+        rows: rowsToProcess.length,
+        mapped: mappedMessages.length
+      })
       for (let index = 0; index < mappedMessages.length; index += 1) {
         const msg = mappedMessages[index]
         rawRowsConsumed += 1

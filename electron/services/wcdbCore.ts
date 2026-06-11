@@ -1818,7 +1818,7 @@ export class WcdbCore {
     }
     try {
       // 1. 打开游标 (使用 Ascending=1 从指定时间往后查)
-      const openRes = await this.openMessageCursor(sessionId, limit, true, minTime, 0)
+      const openRes = await this.openMessageCursorForList(sessionId, limit, true, minTime, 0)
       if (!openRes.success || !openRes.cursor) {
         return { success: false, error: openRes.error }
       }
@@ -3535,6 +3535,40 @@ export class WcdbCore {
     return true
   }
 
+  private async openMessageCursorForList(
+    sessionId: string,
+    batchSize: number,
+    ascending: boolean,
+    beginTimestamp: number,
+    endTimestamp: number
+  ): Promise<{ success: boolean; cursor?: number; error?: string; mode: 'lite' | 'full' }> {
+    const startedAt = nowMs()
+    const liteResult = await this.openMessageCursorLite(sessionId, batchSize, ascending, beginTimestamp, endTimestamp)
+    if (liteResult.success && liteResult.cursor) {
+      logPerf('wcdbCore', 'openMessageCursorForList', nowMs() - startedAt, {
+        sessionId,
+        batchSize,
+        ascending,
+        beginTimestamp,
+        endTimestamp,
+        mode: 'lite'
+      })
+      return { ...liteResult, mode: 'lite' }
+    }
+
+    const fullResult = await this.openMessageCursor(sessionId, batchSize, ascending, beginTimestamp, endTimestamp)
+    logPerf('wcdbCore', 'openMessageCursorForList', nowMs() - startedAt, {
+      sessionId,
+      batchSize,
+      ascending,
+      beginTimestamp,
+      endTimestamp,
+      mode: 'full',
+      liteError: liteResult.error || ''
+    })
+    return { ...fullResult, mode: 'full' }
+  }
+
   async openMessageCursor(sessionId: string, batchSize: number, ascending: boolean, beginTimestamp: number, endTimestamp: number): Promise<{ success: boolean; cursor?: number; error?: string }> {
     if (!this.ensureReady()) {
       return { success: false, error: 'WCDB 未连接' }
@@ -3657,21 +3691,44 @@ export class WcdbCore {
   }
 
   async fetchMessageBatch(cursor: number): Promise<{ success: boolean; rows?: any[]; hasMore?: boolean; error?: string }> {
+    const startedAt = nowMs()
     if (!this.ensureReady()) {
+      logPerf('wcdbCore', 'fetchMessageBatch.notConnected', nowMs() - startedAt, { cursor })
       return { success: false, error: 'WCDB 未连接' }
     }
     try {
       const outPtr = [null as any]
       const outHasMore = [0]
+      const nativeStartedAt = nowMs()
       const result = this.wcdbFetchMessageBatch(this.handle, cursor, outPtr, outHasMore)
+      const nativeMs = nowMs() - nativeStartedAt
       if (result !== 0 || !outPtr[0]) {
+        logPerf('wcdbCore', 'fetchMessageBatch.nativeFailed', nowMs() - startedAt, {
+          cursor,
+          nativeMs,
+          result
+        })
         return { success: false, error: `获取批次失败: ${result}` }
       }
+      const decodeStartedAt = nowMs()
       const jsonStr = this.decodeJsonPtr(outPtr[0])
+      const decodeMs = nowMs() - decodeStartedAt
       if (!jsonStr) return { success: false, error: '解析批次失败' }
+      const parseStartedAt = nowMs()
       const rows = this.parseMessageJson(jsonStr)
+      const parseMs = nowMs() - parseStartedAt
+      logPerf('wcdbCore', 'fetchMessageBatch', nowMs() - startedAt, {
+        cursor,
+        nativeMs,
+        decodeMs,
+        parseMs,
+        jsonBytes: jsonStr.length,
+        rows: Array.isArray(rows) ? rows.length : 0,
+        hasMore: outHasMore[0] === 1
+      })
       return { success: true, rows, hasMore: outHasMore[0] === 1 }
     } catch (e) {
+      logPerf('wcdbCore', 'fetchMessageBatch.error', nowMs() - startedAt, { cursor })
       return { success: false, error: String(e) }
     }
   }

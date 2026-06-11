@@ -24,6 +24,154 @@ import {
   parseVoiceDurationSeconds
 } from './messageParsing'
 
+type MapRowsOptions = {
+  forList?: boolean
+}
+
+type Type49FieldBag = {
+  xmlType?: string
+  linkTitle?: string
+  linkUrl?: string
+  linkThumb?: string
+  fileName?: string
+  fileSize?: number
+  fileExt?: string
+  fileMd5?: string
+  appMsgKind?: string
+  appMsgDesc?: string
+  appMsgAppName?: string
+  appMsgSourceName?: string
+  appMsgSourceUsername?: string
+  appMsgThumbUrl?: string
+  appMsgMusicUrl?: string
+  appMsgDataUrl?: string
+  appMsgLocationLabel?: string
+  finderNickname?: string
+  finderUsername?: string
+  finderCoverUrl?: string
+  finderAvatar?: string
+  finderDuration?: number
+  locationLat?: number
+  locationLng?: number
+  locationPoiname?: string
+  locationLabel?: string
+  musicAlbumUrl?: string
+  musicUrl?: string
+  giftImageUrl?: string
+  giftWish?: string
+  giftPrice?: string
+  chatRecordTitle?: string
+  chatRecordList?: Message['chatRecordList']
+  transferPayerUsername?: string
+  transferReceiverUsername?: string
+  quotedContent?: string
+  quotedSender?: string
+}
+
+function mergeType49Info(target: Type49FieldBag, source: ReturnType<typeof parseType49Message>, mode: 'replace' | 'merge'): void {
+  const assign = <K extends keyof Type49FieldBag>(key: K, value: Type49FieldBag[K]) => {
+    if (value === undefined || value === null) return
+    if (mode === 'replace' || target[key] === undefined || target[key] === null) {
+      target[key] = value
+      return
+    }
+    if (typeof value === 'number' && typeof target[key] === 'number') {
+      target[key] = value
+    }
+  }
+
+  assign('xmlType', source.xmlType)
+  assign('linkTitle', source.linkTitle)
+  assign('linkUrl', source.linkUrl)
+  assign('linkThumb', source.linkThumb)
+  assign('fileName', source.fileName)
+  assign('fileSize', source.fileSize)
+  assign('fileExt', source.fileExt)
+  assign('fileMd5', source.fileMd5)
+  assign('appMsgKind', source.appMsgKind)
+  assign('appMsgDesc', source.appMsgDesc)
+  assign('appMsgAppName', source.appMsgAppName)
+  assign('appMsgSourceName', source.appMsgSourceName)
+  assign('appMsgSourceUsername', source.appMsgSourceUsername)
+  assign('appMsgThumbUrl', source.appMsgThumbUrl)
+  assign('appMsgMusicUrl', source.appMsgMusicUrl)
+  assign('appMsgDataUrl', source.appMsgDataUrl)
+  assign('appMsgLocationLabel', source.appMsgLocationLabel)
+  assign('finderNickname', source.finderNickname)
+  assign('finderUsername', source.finderUsername)
+  assign('finderCoverUrl', source.finderCoverUrl)
+  assign('finderAvatar', source.finderAvatar)
+  assign('finderDuration', source.finderDuration)
+  assign('locationLat', source.locationLat)
+  assign('locationLng', source.locationLng)
+  assign('locationPoiname', source.locationPoiname)
+  assign('locationLabel', source.locationLabel)
+  assign('musicAlbumUrl', source.musicAlbumUrl)
+  assign('musicUrl', source.musicUrl)
+  assign('giftImageUrl', source.giftImageUrl)
+  assign('giftWish', source.giftWish)
+  assign('giftPrice', source.giftPrice)
+  assign('chatRecordTitle', source.chatRecordTitle)
+  assign('chatRecordList', source.chatRecordList)
+  assign('transferPayerUsername', source.transferPayerUsername)
+  assign('transferReceiverUsername', source.transferReceiverUsername)
+  if (source.quotedContent !== undefined) {
+    assign('quotedContent', source.quotedContent)
+  }
+  if (source.quotedSender !== undefined) {
+    assign('quotedSender', source.quotedSender)
+  }
+}
+
+function resolveListParsedContent(content: string, localType: number): string {
+  switch (localType) {
+    case 3:
+      return '[图片]'
+    case 34:
+      return '[语音消息]'
+    case 42:
+      return '[名片]'
+    case 43:
+      return '[视频]'
+    case 47:
+      return '[动画表情]'
+    case 48: {
+      const label =
+        extractXmlAttribute(content, 'location', 'label') ||
+        extractXmlAttribute(content, 'location', 'poiname') ||
+        extractXmlValue(content, 'label') ||
+        extractXmlValue(content, 'poiname')
+      return label ? `[位置] ${label}` : '[位置]'
+    }
+    case 49:
+    case 8589934592049:
+    case 244813135921:
+    case 81604378673:
+    case 8594229559345:
+      return parseMessageContent(content, localType)
+    default:
+      return parseMessageContent(content, localType)
+  }
+}
+
+export function enrichMessageForDisplay(message: Message, sessionId: string, row?: Record<string, any>): Message {
+  if (!row) return message
+  const [enriched] = mapRowsToMessagesInternal([row], sessionId, '', { forList: false })
+  if (!enriched) return message
+  return {
+    ...message,
+    ...enriched,
+    messageKey: message.messageKey || enriched.messageKey,
+    parsedContent: enriched.parsedContent || message.parsedContent,
+    rawContent: message.rawContent || enriched.rawContent,
+    content: message.content || enriched.content
+  }
+}
+
+export function mapRowsToMessagesForList(rows: Record<string, any>[], sessionId: string, myWxidParam: string): Message[] {
+  return mapRowsToMessagesInternal(rows, sessionId, myWxidParam, { forList: true })
+}
+
 export function mapRowsToMessagesLite(rows: Record<string, any>[], myWxidParam: string): Message[] {
     const myWxid = String(myWxidParam || '').trim()
     const messages: Message[] = []
@@ -76,7 +224,17 @@ export function mapRowsToMessagesLite(rows: Record<string, any>[], myWxidParam: 
   }
 
 export function mapRowsToMessages(rows: Record<string, any>[], sessionId: string, myWxidParam: string): Message[] {
+  return mapRowsToMessagesInternal(rows, sessionId, myWxidParam, { forList: false })
+}
+
+function mapRowsToMessagesInternal(
+  rows: Record<string, any>[],
+  sessionId: string,
+  myWxidParam: string,
+  options: MapRowsOptions = {}
+): Message[] {
   const myWxid = String(myWxidParam || '').trim()
+  const forList = options.forList === true
 
     const messages: Message[] = []
     for (const row of rows) {
@@ -94,7 +252,7 @@ export function mapRowsToMessages(rows: Record<string, any>[], sessionId: string
       const { isSend } = resolveMessageIsSend(parsedRawIsSend, senderUsername, myWxid)
       const createTime = getRowTimestampSeconds(row, ['create_time', 'createTime', 'msg_time', 'msgTime', 'time'], 0)
 
-      if (senderUsername && !myWxid) {
+      if (!forList && senderUsername && !myWxid) {
         // [DEBUG] Issue #34: 未配置 myWxid，无法判断是否发送
         if (messages.length < 5) {
           console.warn(`[ChatService] Warning: myWxid not set. Cannot determine if message is sent by me. sender=${senderUsername}`)
@@ -113,7 +271,6 @@ export function mapRowsToMessages(rows: Record<string, any>[], sessionId: string
       let encrypVer: number | undefined
       let cdnThumbUrl: string | undefined
       let voiceDurationSeconds: number | undefined
-      // Type 49 细分字段
       let linkTitle: string | undefined
       let linkUrl: string | undefined
       let linkThumb: string | undefined
@@ -145,42 +302,15 @@ export function mapRowsToMessages(rows: Record<string, any>[], sessionId: string
       let giftImageUrl: string | undefined
       let giftWish: string | undefined
       let giftPrice: string | undefined
-      // 名片消息
       let cardUsername: string | undefined
       let cardNickname: string | undefined
       let cardAvatarUrl: string | undefined
-      // 转账消息
       let transferPayerUsername: string | undefined
       let transferReceiverUsername: string | undefined
-      // 聊天记录
       let chatRecordTitle: string | undefined
-      let chatRecordList: Array<{
-        datatype: number
-        sourcename: string
-        sourcetime: string
-        sourceheadurl?: string
-        datadesc?: string
-        datatitle?: string
-        fileext?: string
-        datasize?: number
-        messageuuid?: string
-        dataurl?: string
-        datathumburl?: string
-        datacdnurl?: string
-        cdndatakey?: string
-        cdnthumbkey?: string
-        aeskey?: string
-        md5?: string
-        fullmd5?: string
-        thumbfullmd5?: string
-        srcMsgLocalid?: number
-        imgheight?: number
-        imgwidth?: number
-        duration?: number
-        chatRecordTitle?: string
-        chatRecordDesc?: string
-        chatRecordList?: any[]
-      }> | undefined
+      let chatRecordList: Message['chatRecordList']
+      const type49Fields: Type49FieldBag = {}
+      let type49Parsed = false
 
       if (localType === 47 && content) {
         const emojiInfo = parseEmojiInfo(content)
@@ -229,23 +359,8 @@ export function mapRowsToMessages(rows: Record<string, any>[], sessionId: string
         locationLabel = extractXmlAttribute(content, 'location', 'label') || extractXmlValue(content, 'label') || undefined
         locationPoiname = extractXmlAttribute(content, 'location', 'poiname') || extractXmlValue(content, 'poiname') || undefined
       } else if ((localType === 49 || localType === 8589934592049) && content) {
-        // Type 49 消息（链接、文件、小程序、转账等），8589934592049 也是转账类型
-        const type49Info = parseType49Message(content)
-        xmlType = type49Info.xmlType
-        linkTitle = type49Info.linkTitle
-        linkUrl = type49Info.linkUrl
-        linkThumb = type49Info.linkThumb
-        fileName = type49Info.fileName
-        fileSize = type49Info.fileSize
-        fileExt = type49Info.fileExt
-        fileMd5 = type49Info.fileMd5
-        chatRecordTitle = type49Info.chatRecordTitle
-        chatRecordList = type49Info.chatRecordList
-        transferPayerUsername = type49Info.transferPayerUsername
-        transferReceiverUsername = type49Info.transferReceiverUsername
-        // 引用消息（appmsg type=57）的 quotedContent/quotedSender
-        if (type49Info.quotedContent !== undefined) quotedContent = type49Info.quotedContent
-        if (type49Info.quotedSender !== undefined) quotedSender = type49Info.quotedSender
+        mergeType49Info(type49Fields, parseType49Message(content), 'replace')
+        type49Parsed = true
       } else if (localType === 244813135921 || (content && content.includes('<type>57</type>'))) {
         const quoteInfo = parseQuoteMessage(content)
         quotedContent = quoteInfo.content
@@ -253,46 +368,48 @@ export function mapRowsToMessages(rows: Record<string, any>[], sessionId: string
       }
 
       const looksLikeAppMsg = Boolean(content && (content.includes('<appmsg') || content.includes('&lt;appmsg')))
-      if (looksLikeAppMsg) {
-        const type49Info = parseType49Message(content)
-        xmlType = xmlType || type49Info.xmlType
-        linkTitle = linkTitle || type49Info.linkTitle
-        linkUrl = linkUrl || type49Info.linkUrl
-        linkThumb = linkThumb || type49Info.linkThumb
-        fileName = fileName || type49Info.fileName
-        fileSize = fileSize ?? type49Info.fileSize
-        fileExt = fileExt || type49Info.fileExt
-        fileMd5 = fileMd5 || type49Info.fileMd5
-        appMsgKind = appMsgKind || type49Info.appMsgKind
-        appMsgDesc = appMsgDesc || type49Info.appMsgDesc
-        appMsgAppName = appMsgAppName || type49Info.appMsgAppName
-        appMsgSourceName = appMsgSourceName || type49Info.appMsgSourceName
-        appMsgSourceUsername = appMsgSourceUsername || type49Info.appMsgSourceUsername
-        appMsgThumbUrl = appMsgThumbUrl || type49Info.appMsgThumbUrl
-        appMsgMusicUrl = appMsgMusicUrl || type49Info.appMsgMusicUrl
-        appMsgDataUrl = appMsgDataUrl || type49Info.appMsgDataUrl
-        appMsgLocationLabel = appMsgLocationLabel || type49Info.appMsgLocationLabel
-        finderNickname = finderNickname || type49Info.finderNickname
-        finderUsername = finderUsername || type49Info.finderUsername
-        finderCoverUrl = finderCoverUrl || type49Info.finderCoverUrl
-        finderAvatar = finderAvatar || type49Info.finderAvatar
-        finderDuration = finderDuration ?? type49Info.finderDuration
-        locationLat = locationLat ?? type49Info.locationLat
-        locationLng = locationLng ?? type49Info.locationLng
-        locationPoiname = locationPoiname || type49Info.locationPoiname
-        locationLabel = locationLabel || type49Info.locationLabel
-        musicAlbumUrl = musicAlbumUrl || type49Info.musicAlbumUrl
-        musicUrl = musicUrl || type49Info.musicUrl
-        giftImageUrl = giftImageUrl || type49Info.giftImageUrl
-        giftWish = giftWish || type49Info.giftWish
-        giftPrice = giftPrice || type49Info.giftPrice
-        chatRecordTitle = chatRecordTitle || type49Info.chatRecordTitle
-        chatRecordList = chatRecordList || type49Info.chatRecordList
-        transferPayerUsername = transferPayerUsername || type49Info.transferPayerUsername
-        transferReceiverUsername = transferReceiverUsername || type49Info.transferReceiverUsername
-        if (!quotedContent && type49Info.quotedContent !== undefined) quotedContent = type49Info.quotedContent
-        if (!quotedSender && type49Info.quotedSender !== undefined) quotedSender = type49Info.quotedSender
+      if (!type49Parsed && looksLikeAppMsg) {
+        mergeType49Info(type49Fields, parseType49Message(content), 'merge')
+        type49Parsed = true
       }
+
+      xmlType = type49Fields.xmlType
+      linkTitle = type49Fields.linkTitle
+      linkUrl = type49Fields.linkUrl
+      linkThumb = type49Fields.linkThumb
+      fileName = type49Fields.fileName
+      fileSize = type49Fields.fileSize
+      fileExt = type49Fields.fileExt
+      fileMd5 = type49Fields.fileMd5
+      appMsgKind = type49Fields.appMsgKind
+      appMsgDesc = type49Fields.appMsgDesc
+      appMsgAppName = type49Fields.appMsgAppName
+      appMsgSourceName = type49Fields.appMsgSourceName
+      appMsgSourceUsername = type49Fields.appMsgSourceUsername
+      appMsgThumbUrl = type49Fields.appMsgThumbUrl
+      appMsgMusicUrl = type49Fields.appMsgMusicUrl
+      appMsgDataUrl = type49Fields.appMsgDataUrl
+      appMsgLocationLabel = type49Fields.appMsgLocationLabel
+      finderNickname = type49Fields.finderNickname
+      finderUsername = type49Fields.finderUsername
+      finderCoverUrl = type49Fields.finderCoverUrl
+      finderAvatar = type49Fields.finderAvatar
+      finderDuration = type49Fields.finderDuration
+      locationLat = type49Fields.locationLat
+      locationLng = type49Fields.locationLng
+      locationPoiname = type49Fields.locationPoiname
+      locationLabel = type49Fields.locationLabel
+      musicAlbumUrl = type49Fields.musicAlbumUrl
+      musicUrl = type49Fields.musicUrl
+      giftImageUrl = type49Fields.giftImageUrl
+      giftWish = type49Fields.giftWish
+      giftPrice = type49Fields.giftPrice
+      chatRecordTitle = type49Fields.chatRecordTitle
+      chatRecordList = type49Fields.chatRecordList
+      transferPayerUsername = type49Fields.transferPayerUsername
+      transferReceiverUsername = type49Fields.transferReceiverUsername
+      if (type49Fields.quotedContent !== undefined) quotedContent = type49Fields.quotedContent
+      if (type49Fields.quotedSender !== undefined) quotedSender = type49Fields.quotedSender
 
       const localId = getRowInt(row, ['local_id'], 0)
       const serverIdRaw = normalizeUnsignedIntegerToken(row.server_id)
@@ -317,7 +434,9 @@ export function mapRowsToMessages(rows: Record<string, any>[], sessionId: string
         sortSeq,
         isSend,
         senderUsername,
-        parsedContent: parseMessageContent(content, localType),
+        parsedContent: forList
+          ? resolveListParsedContent(content, localType)
+          : parseMessageContent(content, localType),
         rawContent: content,
         emojiCdnUrl,
         emojiMd5,
@@ -371,14 +490,16 @@ export function mapRowsToMessages(rows: Record<string, any>[], sessionId: string
         chatRecordList,
         _db_path: sourceInfo.dbPath
       })
-      const last = messages[messages.length - 1]
-      if ((last.localType === 3 || last.localType === 34) && (last.localId === 0 || last.createTime === 0)) {
-        console.warn('[ChatService] message key missing', {
-          localType: last.localType,
-          localId: last.localId,
-          createTime: last.createTime,
-          rowKeys: Object.keys(row)
-        })
+      if (!forList) {
+        const last = messages[messages.length - 1]
+        if ((last.localType === 3 || last.localType === 34) && (last.localId === 0 || last.createTime === 0)) {
+          console.warn('[ChatService] message key missing', {
+            localType: last.localType,
+            localId: last.localId,
+            createTime: last.createTime,
+            rowKeys: Object.keys(row)
+          })
+        }
       }
     }
     return messages

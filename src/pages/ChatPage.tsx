@@ -47,6 +47,7 @@ import MemoMessageBubble, {
   senderAvatarCache,
   senderAvatarLoading
 } from './Chat/MessageBubbleItem'
+import { hydrateMessageRawContent } from './Chat/messageRawContentHydration'
 import type { QuotedMessageJumpTarget } from './Chat/messageBubbleTypes'
 import {
   cleanMessageContent,
@@ -72,7 +73,7 @@ import {
 } from './Chat/chatPageCacheUtils'
 import { runHardlinkPreloadIfNeeded } from '../utils/runHardlinkPreload'
 import { collectImageHardlinkMd5s } from '../utils/collectImageHardlinkMd5s'
-import { logPerf, nowMs } from '../utils/perfLogger'
+import { estimateJsonBytes, logPerf, nowMs } from '../utils/perfLogger'
 import { avatarLoadQueue } from '../utils/AvatarLoadQueue'
 import { Avatar } from '../components/Avatar'
 import '../styles/batchTranscribe.scss'
@@ -2970,7 +2971,8 @@ function ChatPage(props: ChatPageProps) {
         success: result.success,
         returned: result.messages?.length || 0,
         hasMore: result.hasMore === true,
-        nextOffset: result.nextOffset || 0
+        nextOffset: result.nextOffset || 0,
+        payloadBytes: estimateJsonBytes(result.messages)
       })
       const isStaleSwitchRequest = Boolean(
         options.switchRequestSeq && options.switchRequestSeq !== sessionSwitchRequestSeqRef.current
@@ -6243,16 +6245,19 @@ function ChatPage(props: ChatPageProps) {
   }
 
   // 修改消息
-  const handleEditMessage = useCallback(() => {
-    if (contextMenu) {
-      // 允许编辑所有类型的消息
-      // 如果是文本消息(1)，使用 parsedContent
-      // 如果是其他类型(如系统消息 10000)，使用 rawContent 或 content 作为 XML 源码编辑
-      const isText = contextMenu.message.localType === 1
-      const rawXml = contextMenu.message.content || (contextMenu.message as any).rawContent || contextMenu.message.parsedContent || ''
+  const handleEditMessage = useCallback(async () => {
+    if (!contextMenu || !currentSessionId) return
+
+    const hydratedMessage = await hydrateMessageRawContent(currentSessionId, contextMenu.message)
+
+    // 允许编辑所有类型的消息
+    // 如果是文本消息(1)，使用 parsedContent
+    // 如果是其他类型(如系统消息 10000)，使用 rawContent 或 content 作为 XML 源码编辑
+    const isText = hydratedMessage.localType === 1
+      const rawXml = hydratedMessage.content || hydratedMessage.rawContent || hydratedMessage.parsedContent || ''
 
       const contentToEdit = isText
-        ? cleanMessageContent(contextMenu.message.parsedContent)
+        ? cleanMessageContent(hydratedMessage.parsedContent)
         : rawXml
 
       if (!isText) {
@@ -6265,12 +6270,11 @@ function ChatPage(props: ChatPageProps) {
       }
 
       setEditingMessage({
-        message: contextMenu.message,
+        message: hydratedMessage,
         content: contentToEdit
       })
       setContextMenu(null)
-    }
-  }, [contextMenu])
+  }, [contextMenu, currentSessionId])
 
   // 确认修改消息
   const handleSaveEdit = useCallback(async () => {
@@ -7751,7 +7755,14 @@ function ChatPage(props: ChatPageProps) {
               <Trash2 size={16} />
               <span>删除消息</span>
             </div>
-            <div className="menu-item" onClick={() => { setShowMessageInfo(contextMenu.message); setContextMenu(null) }}>
+            <div className="menu-item" onClick={() => {
+              void (async () => {
+                if (!contextMenu || !currentSessionId) return
+                const hydratedMessage = await hydrateMessageRawContent(currentSessionId, contextMenu.message)
+                setShowMessageInfo(hydratedMessage)
+                setContextMenu(null)
+              })()
+            }}>
               <Info size={16} />
               <span>查看消息信息</span>
             </div>

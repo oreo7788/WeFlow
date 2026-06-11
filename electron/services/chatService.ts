@@ -78,6 +78,7 @@ import type { EmojiHost } from './chat/emojiHost'
 import { SessionFilterService } from './chat/sessionFilterService'
 import { MessageParseService } from './chat/messageParseService'
 import type { MessageParseHost } from './chat/messageParseHost'
+import { slimMessagesForListIpc } from './chat/messageIpcSerializer'
 import { MessageQueryService } from './chat/messageQueryService'
 
 
@@ -838,18 +839,33 @@ class ChatService {
     endTime: number = 0,
     ascending: boolean = false
   ): Promise<{ success: boolean; messages?: Message[]; hasMore?: boolean; nextOffset?: number; error?: string }> {
-    return this.messageCursorService.getMessages(sessionId, offset, limit, startTime, endTime, ascending)
+    const result = await this.messageCursorService.getMessages(sessionId, offset, limit, startTime, endTime, ascending)
+    if (!result.success || !result.messages) return result
+    return {
+      ...result,
+      messages: slimMessagesForListIpc(result.messages, { sessionId, source: 'getMessages' })
+    }
   }
 
   async getCachedSessionMessages(sessionId: string): Promise<{ success: boolean; messages?: Message[]; error?: string }> {
-    return this.messageCursorService.getCachedSessionMessages(sessionId)
+    const result = await this.messageCursorService.getCachedSessionMessages(sessionId)
+    if (!result.success || !result.messages) return result
+    return {
+      ...result,
+      messages: slimMessagesForListIpc(result.messages, { sessionId, source: 'getCachedSessionMessages' })
+    }
   }
 
   async getLatestMessages(
     sessionId: string,
     limit: number = 50
   ): Promise<{ success: boolean; messages?: Message[]; hasMore?: boolean; nextOffset?: number; error?: string }> {
-    return this.messageCursorService.getLatestMessages(sessionId, limit)
+    const result = await this.messageCursorService.getLatestMessages(sessionId, limit)
+    if (!result.success || !result.messages) return result
+    return {
+      ...result,
+      messages: slimMessagesForListIpc(result.messages, { sessionId, source: 'getLatestMessages' })
+    }
   }
 
   async getNewMessages(
@@ -857,7 +873,12 @@ class ChatService {
     minTime: number,
     limit: number = 50
   ): Promise<{ success: boolean; messages?: Message[]; error?: string }> {
-    return this.messageCursorService.getNewMessages(sessionId, minTime, limit)
+    const result = await this.messageCursorService.getNewMessages(sessionId, minTime, limit)
+    if (!result.success || !result.messages) return result
+    return {
+      ...result,
+      messages: slimMessagesForListIpc(result.messages, { sessionId, source: 'getNewMessages' })
+    }
   }
 
 
@@ -1381,7 +1402,12 @@ class ChatService {
   }
 
   async searchMessages(keyword: string, sessionId?: string, limit?: number, offset?: number, beginTimestamp?: number, endTimestamp?: number): Promise<{ success: boolean; messages?: Message[]; error?: string }> {
-    return this.messageQueryService.searchMessages(keyword, sessionId, limit, offset, beginTimestamp, endTimestamp)
+    const result = await this.messageQueryService.searchMessages(keyword, sessionId, limit, offset, beginTimestamp, endTimestamp)
+    if (!result.success || !result.messages) return result
+    return {
+      ...result,
+      messages: slimMessagesForListIpc(result.messages, { sessionId: sessionId || '', source: 'searchMessages' })
+    }
   }
 
   async execQuery(kind: string, path: string | null, sql: string): Promise<{ success: boolean; rows?: any[]; error?: string }> {

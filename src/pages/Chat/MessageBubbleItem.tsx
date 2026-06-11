@@ -41,6 +41,7 @@ import {
   resolveQuotedSenderFallbackDisplayName
 } from './quotedSenderUtils'
 import type { QuotedMessageJumpTarget } from './messageBubbleTypes'
+import { useMessageRawContent } from './messageRawContentHydration'
 
 // 全局语音播放管理器：同一时间只能播放一条语音
 const globalVoiceManager = {
@@ -207,6 +208,7 @@ function MessageBubble({
   const isCall = message.localType === 50
   const isType49 = message.localType === 49
   const isSent = message.isSend === 1
+  const { rawContent: messageRawContent } = useMessageRawContent(message, session.username)
   const [senderAvatarUrl, setSenderAvatarUrl] = useState<string | undefined>(undefined)
   const [senderName, setSenderName] = useState<string | undefined>(undefined)
   const [quotedSenderName, setQuotedSenderName] = useState<string | undefined>(undefined)
@@ -223,7 +225,7 @@ function MessageBubble({
   const imageCacheKey = message.imageMd5 || message.imageDatName || `local:${message.localId}`
   const resolvedImageOriginSourceMd5 =
     message.imageOriginSourceMd5 ||
-    extractImageOriginSourceMd5(message.rawContent, message.imageMd5)
+    extractImageOriginSourceMd5(messageRawContent, message.imageMd5)
   const [imageLocalPath, setImageLocalPath] = useState<string | undefined>(
     () => toRenderableImageSrc(imageDataUrlCache.get(imageCacheKey))
   )
@@ -315,7 +317,7 @@ function MessageBubble({
     }
 
     // 尝试从多个可能的字段获取原始内容
-    const contentToUse = message.content || (message as any).rawContent || message.parsedContent
+    const contentToUse = messageRawContent || message.parsedContent
     if (contentToUse) {
 
       window.electronAPI.video.parseVideoMd5(contentToUse).then((result: { success: boolean; md5?: string; error?: string }) => {
@@ -1276,7 +1278,7 @@ function MessageBubble({
     [cleanMessageContent, message.parsedContent]
   )
 
-  const appMsgRawXml = message.rawContent || message.parsedContent || ''
+  const appMsgRawXml = messageRawContent || message.parsedContent || ''
   const appMsgContainsTag = useMemo(
     () => appMsgRawXml.includes('<appmsg') || appMsgRawXml.includes('&lt;appmsg'),
     [appMsgRawXml]
@@ -1394,7 +1396,7 @@ function MessageBubble({
 
   const locationMessageMeta = useMemo(() => {
     if (message.localType !== 48) return null
-    const raw = message.rawContent || ''
+    const raw = messageRawContent || ''
     const poiname = raw.match(/poiname="([^"]*)"/)?.[1] || message.locationPoiname || '位置'
     const label = raw.match(/label="([^"]*)"/)?.[1] || message.locationLabel || ''
     const lat = parseFloat(raw.match(/x="([^"]*)"/)?.[1] || String(message.locationLat || 0))
@@ -1407,7 +1409,7 @@ function MessageBubble({
       ? `https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x=${tileX}&y=${tileY}&z=${zoom}`
       : ''
     return { poiname, label, lat, lng, mapTileUrl }
-  }, [message.localType, message.rawContent, message.locationPoiname, message.locationLabel, message.locationLat, message.locationLng])
+  }, [message.localType, messageRawContent, message.locationPoiname, message.locationLabel, message.locationLat, message.locationLng])
 
   // 检测是否为链接卡片消息
   const isLinkMessage = String(message.localType) === '21474836529' || appMsgContainsTag

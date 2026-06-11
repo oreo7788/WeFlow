@@ -56,3 +56,11 @@ export function logPerf(
 export function nowMs(): number {
   return performance.now()
 }
+
+export function estimateJsonBytes(value: unknown): number {
+  try {
+    return new TextEncoder().encode(JSON.stringify(value)).length
+  } catch {
+    return 0
+  }
+}

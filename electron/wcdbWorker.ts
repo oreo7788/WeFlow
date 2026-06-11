@@ -1,7 +1,23 @@
 import { parentPort } from 'worker_threads'
 import { WcdbCore } from './services/wcdbCore'
+import { estimateJsonBytes, isPerfRecordingEnabled, logPerf, nowMs } from './utils/perfLogger'
 
 const core = new WcdbCore()
+
+const WORKER_PERF_HOT_TYPES = new Set([
+    'getMessages',
+    'getNewMessages',
+    'fetchMessageBatch',
+    'openMessageCursor',
+    'openMessageCursorLite',
+    'getSessions',
+    'getDisplayNames',
+    'getAvatarUrls',
+    'searchMessages',
+    'getMessageByServerId',
+    'getMessageCounts',
+    'getSessionMessageCounts'
+])
 
 if (parentPort) {
     let isShuttingDown = false
@@ -9,6 +25,8 @@ if (parentPort) {
 
     const processMessage = async (msg: { id: number; type: string; payload: any }) => {
         const { id, type, payload } = msg
+        const startedAt = nowMs()
+        const shouldLogWorkerPerf = isPerfRecordingEnabled() && WORKER_PERF_HOT_TYPES.has(type)
 
         if (isShuttingDown && type !== 'close') {
             parentPort!.postMessage({ id, error: 'Worker shutting down' })
@@ -316,8 +334,19 @@ if (parentPort) {
             }
 
             parentPort!.postMessage({ id, result })
+            if (shouldLogWorkerPerf) {
+                logPerf('wcdbWorker', type, nowMs() - startedAt, {
+                    payloadBytes: estimateJsonBytes(payload),
+                    resultBytes: estimateJsonBytes(result)
+                })
+            }
         } catch (e) {
             parentPort!.postMessage({ id, error: String(e) })
+            if (shouldLogWorkerPerf) {
+                logPerf('wcdbWorker', `${type}.error`, nowMs() - startedAt, {
+                    payloadBytes: estimateJsonBytes(payload)
+                })
+            }
         }
     }
 

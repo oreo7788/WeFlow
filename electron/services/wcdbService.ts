@@ -540,6 +540,25 @@ export class WcdbService {
   }
 
   /**
+   * 聊天列表优先使用轻量游标，失败时回退标准游标。
+   */
+  async openListMessageCursor(
+    sessionId: string,
+    batchSize: number,
+    ascending: boolean,
+    beginTimestamp: number,
+    endTimestamp: number
+  ): Promise<{ success: boolean; cursor?: number; error?: string; mode?: 'lite' | 'full' }> {
+    const liteResult = await this.openMessageCursorLite(sessionId, batchSize, ascending, beginTimestamp, endTimestamp)
+    if (liteResult.success && liteResult.cursor) {
+      return { ...liteResult, mode: 'lite' }
+    }
+
+    const fullResult = await this.openMessageCursor(sessionId, batchSize, ascending, beginTimestamp, endTimestamp)
+    return { ...fullResult, mode: 'full' }
+  }
+
+  /**
    * 获取下一批消息
    */
   async fetchMessageBatch(cursor: number): Promise<{ success: boolean; rows?: any[]; hasMore?: boolean; error?: string }> {

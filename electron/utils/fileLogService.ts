@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { join } from 'path'
 import { tmpdir } from 'os'
 
-export type LogChannel = 'wcdb' | 'image-decrypt' | 'video' | 'app'
+export type LogChannel = 'wcdb' | 'image-decrypt' | 'video' | 'app' | 'perf'
 export type LogLevel = 'info' | 'warn' | 'error'
 
 const CHANNEL_FILES: Record<LogChannel, string> = {
@@ -10,6 +10,7 @@ const CHANNEL_FILES: Record<LogChannel, string> = {
   'image-decrypt': 'image-decrypt.log',
   video: 'video.log',
   app: 'app.log',
+  perf: 'perf.log',
 }
 
 const ERROR_LOG = 'error.log'

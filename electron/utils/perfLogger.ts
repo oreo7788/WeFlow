@@ -5,10 +5,14 @@ type PerfFields = Record<string, PerfFieldValue>
 
 const DEFAULT_SLOW_THRESHOLD_MS = 100
 
-function isPerfConsoleEnabled(): boolean {
+export function isPerfRecordingEnabled(): boolean {
   return process.env.NODE_ENV === 'development' ||
     process.env.WEFLOW_PERF_LOG === '1' ||
     process.env.WCDB_LOG_ENABLED === '1'
+}
+
+function isPerfConsoleEnabled(): boolean {
+  return isPerfRecordingEnabled()
 }
 
 function formatFieldValue(value: PerfFieldValue): string {
@@ -41,10 +45,10 @@ export function logPerf(
   fields: PerfFields = {},
   slowThresholdMs = DEFAULT_SLOW_THRESHOLD_MS
 ): void {
-  const line = formatPerfLine(area, action, durationMs, fields)
-  fileLogService.write('app', line)
+  if (!isPerfRecordingEnabled()) return
 
-  if (!isPerfConsoleEnabled()) return
+  const line = formatPerfLine(area, action, durationMs, fields)
+  fileLogService.write('perf', line, { force: true })
 
   if (durationMs >= slowThresholdMs) {
     console.warn(line)
@@ -55,4 +59,27 @@ export function logPerf(
 
 export function nowMs(): number {
   return Date.now()
+}
+
+export function estimateJsonBytes(value: unknown): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), 'utf8')
+  } catch {
+    return 0
+  }
+}
+
+export interface PerfTimer {
+  elapsed(): number
+  log(action: string, fields?: PerfFields, slowThresholdMs?: number): void
+}
+
+export function startPerfTimer(area: string): PerfTimer {
+  const startedAt = nowMs()
+  return {
+    elapsed: () => nowMs() - startedAt,
+    log: (action, fields = {}, slowThresholdMs = DEFAULT_SLOW_THRESHOLD_MS) => {
+      logPerf(area, action, nowMs() - startedAt, fields, slowThresholdMs)
+    }
+  }
 }
