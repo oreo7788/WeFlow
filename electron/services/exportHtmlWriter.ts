@@ -1,7 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import type { ExportWriterHost } from './exportWriterContext'
-import { isStopError, isPauseError, buildGroupNicknameIdCandidates, getClampedConcurrency, getMediaCacheKey, getStableMessageKey, normalizeUnsignedIntToken, normalizeSessionIds, pathExists, escapeHtml, getVirtualScrollScript } from './exportServiceUtils'
+import { isStopError, isPauseError, buildGroupNicknameIdCandidates, getClampedConcurrency, getMediaCacheKey, getStableMessageKey, normalizeUnsignedIntToken, normalizeSessionIds, pathExists, escapeHtml, getVirtualScrollScript, getDayHtmlPageInitScript } from './exportServiceUtils'
 import {
   parallelLimit,
   type ChatLabExport,
@@ -16,10 +16,47 @@ import {
 import { wcdbService } from './wcdbService'
 import { EXPORT_HTML_STYLES } from './exportHtmlStyles'
 import { exportHtmlViaRust, isRustHtmlExportAvailable, type HtmlExportOptions } from './nativeExportHtml'
+import { endOfDaySeconds, resolveDayHtmlAbsolutePath, resolvePathPrefixToSessionRoot, startOfDaySeconds } from './exportDayPartition/dayRangeResolver'
+import { resolveDayNavPayload } from './exportDayPartition/dayManifestService'
+import { buildDayExportScriptBlock } from './exportDayPartition/daySharedAssets'
 
 type ExportServiceInstance = ExportWriterHost
 
 export const exportHtmlMixin = {
+  async exportSessionDayToHtml(this: ExportServiceInstance,
+    sessionId: string,
+    sessionDir: string,
+    day: string,
+    options: ExportOptions,
+    onProgress?: (progress: ExportProgress) => void,
+    control?: ExportTaskControl
+  ): Promise<{ success: boolean; error?: string; mediaCount?: number }> {
+    const dayStart = startOfDaySeconds(day)
+    const dayEnd = endOfDaySeconds(day)
+    if (dayStart <= 0 || dayEnd <= 0) {
+      return { success: false, error: `无效日期: ${day}` }
+    }
+
+    const outputPath = resolveDayHtmlAbsolutePath(sessionDir, day)
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true })
+    const dayOptions: ExportOptions = {
+      ...options,
+      htmlPartition: 'day',
+      dayExportDay: day,
+      dayExportSessionDir: sessionDir,
+      dateRange: { start: dayStart, end: dayEnd }
+    }
+
+    const beforeMediaDone = this.getMediaDoneFilesCount()
+    const result = await this.exportSessionToHtml(sessionId, outputPath, dayOptions, onProgress, control)
+    if (!result.success) {
+      return result
+    }
+
+    const mediaCount = Math.max(0, this.getMediaDoneFilesCount() - beforeMediaDone)
+    return { success: true, mediaCount }
+  },
+
   async exportSessionToHtml(this: ExportServiceInstance,
     sessionId: string,
     outputPath: string,
@@ -37,6 +74,14 @@ export const exportHtmlMixin = {
       const rawMyWxid = this.getConfiguredMyWxid()
       const sessionInfo = await this.getContactInfo(sessionId)
       const myInfo = await this.getContactInfo(cleanedMyWxid)
+      const dayExportDay = String(options.dayExportDay || '').trim()
+      const useDaySharedAssets = Boolean(dayExportDay)
+      const sessionRoot = String(options.dayExportSessionDir || '').trim()
+        || path.resolve(outputPath, '../../..')
+      const dayAssetPrefix = useDaySharedAssets
+        ? resolvePathPrefixToSessionRoot(sessionRoot, outputPath)
+        : ''
+      const mediaHrefPrefix = useDaySharedAssets ? dayAssetPrefix : ''
       const contactCache = new Map<string, { success: boolean; contact?: any; error?: string }>()
       const getContactCached = async (username: string) => {
         if (contactCache.has(username)) {
@@ -128,6 +173,9 @@ export const exportHtmlMixin = {
             exportVoices: options.exportVoices,
             exportFiles: options.exportFiles,
             maxFileSizeMb: options.maxFileSizeMb,
+            dayPartition: dayExportDay
+              ? { sessionDir: path.dirname(path.dirname(outputPath)), day: dayExportDay }
+              : undefined
           },
           sortedMessages.map(msg => ({
             id: msg.localId || msg.id,
@@ -275,7 +323,14 @@ export const exportHtmlMixin = {
         })
       }
 
-      const avatarMap = options.exportAvatars
+      const avatarExportDir = useDaySharedAssets
+        ? path.join(sessionRoot, 'media')
+        : path.dirname(outputPath)
+      const avatarHrefPrefix = useDaySharedAssets
+        ? `${dayAssetPrefix}media/avatars/`
+        : 'avatars/'
+
+      const rawAvatarMap = options.exportAvatars
         ? await this.exportAvatarsToFiles(
           [
             ...Array.from(collected.memberSet.entries()).map(([username, info]) => ({
@@ -285,10 +340,22 @@ export const exportHtmlMixin = {
             { username: sessionId, avatarUrl: sessionInfo.avatarUrl },
             { username: cleanedMyWxid, avatarUrl: myInfo.avatarUrl }
           ],
-          path.dirname(outputPath),
+          avatarExportDir,
           control
         )
         : new Map<string, string>()
+
+      const avatarMap = new Map<string, string>()
+      if (useDaySharedAssets) {
+        for (const [username, relPath] of rawAvatarMap.entries()) {
+          const filename = path.posix.basename(String(relPath).replace(/\\/g, '/'))
+          avatarMap.set(username, `${avatarHrefPrefix}${filename}`)
+        }
+      } else {
+        for (const [username, relPath] of rawAvatarMap.entries()) {
+          avatarMap.set(username, relPath)
+        }
+      }
 
       onProgress?.({
         current: 60,
@@ -317,22 +384,35 @@ export const exportHtmlMixin = {
         })
       }
 
+      const dayNavPayload = useDaySharedAssets && dayExportDay
+        ? resolveDayNavPayload(sessionRoot, dayExportDay, dayAssetPrefix, options.targetDays)
+        : null
+      const dayNavScript = dayNavPayload
+        ? `<script>window.WEFLOW_DAY_NAV=${JSON.stringify(dayNavPayload)};</script>\n    `
+        : ''
+
       await writePromise(`<!DOCTYPE html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>${escapeHtml(sessionInfo.displayName)} - 聊天记录</title>
-    <style>${htmlStyles}</style>
+    <title>${escapeHtml(sessionInfo.displayName)}${dayExportDay ? ` - ${escapeHtml(dayExportDay)}` : ' - 聊天记录'}</title>
+    ${useDaySharedAssets
+      ? `<link rel="stylesheet" href="${dayAssetPrefix}assets/export.css" />`
+      : `<style>${htmlStyles}</style>`}
   </head>
-  <body>
+  <body${useDaySharedAssets ? ` data-day="${escapeHtml(dayExportDay)}" data-root-prefix="${escapeHtml(dayAssetPrefix)}"` : ''}>
     <div class="page">
       <div class="header">
         <h1 class="title">${escapeHtml(sessionInfo.displayName)}</h1>
         <div class="meta">
+          ${dayExportDay
+            ? `<span>${escapeHtml(dayExportDay)}</span>
           <span>${sortedMessages.length} 条消息</span>
+          <a href="${dayAssetPrefix}index.html" style="color: var(--accent, #3370ff); text-decoration: none;">← 返回总览</a>`
+            : `<span>${sortedMessages.length} 条消息</span>
           <span>${isGroup ? '群聊' : '私聊'}</span>
-          <span>${escapeHtml(this.formatTimestamp(exportMeta.chatlab.exportedAt))}</span>
+          <span>${escapeHtml(this.formatTimestamp(exportMeta.chatlab.exportedAt))}</span>`}
         </div>
         <div class="controls">
           <input id="searchInput" type="search" placeholder="搜索消息..." />
@@ -461,16 +541,16 @@ export const exportHtmlMixin = {
 
         let mediaHtml = ''
         if (mediaItem?.kind === 'image') {
-          const mediaPath = this.escapeAttribute(encodeURI(mediaItem.relativePath))
+          const mediaPath = this.escapeAttribute(encodeURI(`${mediaHrefPrefix}${mediaItem.relativePath}`))
           mediaHtml = `<img class="message-media image previewable" src="${mediaPath}" data-full="${mediaPath}" alt="${this.escapeAttribute(typeName)}" />`
         } else if (mediaItem?.kind === 'emoji') {
-          const mediaPath = this.escapeAttribute(encodeURI(mediaItem.relativePath))
+          const mediaPath = this.escapeAttribute(encodeURI(`${mediaHrefPrefix}${mediaItem.relativePath}`))
           mediaHtml = `<img class="message-media emoji previewable" src="${mediaPath}" data-full="${mediaPath}" alt="${this.escapeAttribute(typeName)}" />`
         } else if (mediaItem?.kind === 'voice') {
-          mediaHtml = `<audio class="message-media audio" controls src="${this.escapeAttribute(encodeURI(mediaItem.relativePath))}"></audio>`
+          mediaHtml = `<audio class="message-media audio" controls src="${this.escapeAttribute(encodeURI(`${mediaHrefPrefix}${mediaItem.relativePath}`))}"></audio>`
         } else if (mediaItem?.kind === 'video') {
           const posterAttr = mediaItem.posterDataUrl ? ` poster="${this.escapeAttribute(mediaItem.posterDataUrl)}"` : ''
-          mediaHtml = `<video class="message-media video" controls preload="metadata"${posterAttr} src="${this.escapeAttribute(encodeURI(mediaItem.relativePath))}"></video>`
+          mediaHtml = `<video class="message-media video" controls preload="metadata"${posterAttr} src="${this.escapeAttribute(encodeURI(`${mediaHrefPrefix}${mediaItem.relativePath}`))}"></video>`
         }
 
         const textHtml = quotedReplyDisplay
@@ -534,111 +614,13 @@ export const exportHtmlMixin = {
 
       await writePromise(`];
     </script>
-
-    <script>
+    ${dayNavScript}${useDaySharedAssets
+      ? buildDayExportScriptBlock(dayAssetPrefix)
+      : `<script>
        ${getVirtualScrollScript()}
 
-      const searchInput = document.getElementById('searchInput')
-      const timeInput = document.getElementById('timeInput')
-      const jumpBtn = document.getElementById('jumpBtn')
-      const resultCount = document.getElementById('resultCount')
-      const imagePreview = document.getElementById('imagePreview')
-      const imagePreviewTarget = document.getElementById('imagePreviewTarget')
-      const container = document.getElementById('scrollContainer')
-      let imageZoom = 1
-
-      // Initial Data
-      let allData = window.WEFLOW_DATA || [];
-      let currentList = allData;
-
-      // Render Item Function
-      const renderItem = (item, index) => {
-         const isSenderMe = item.s === 1;
-         const platformIdAttr = item.p ? \` data-platform-message-id="\${item.p}"\` : '';
-         const replyToAttr = item.r ? \` data-reply-to-message-id="\${item.r}"\` : '';
-         return \`
-          <div class="message \${isSenderMe ? 'sent' : 'received'}" data-index="\${item.i}"\${platformIdAttr}\${replyToAttr}>
-            <div class="message-row">
-              <div class="avatar">\${item.a}</div>
-              <div class="bubble">
-                \${item.b}
-              </div>
-            </div>
-          </div>
-         \`;
-      };
-      
-      const renderer = new ChunkedRenderer(container, currentList, renderItem);
-
-      const updateCount = () => {
-        resultCount.textContent = \`共 \${currentList.length} 条\`
-      }
-
-      // Search Logic
-      let searchTimeout;
-      searchInput.addEventListener('input', () => {
-        clearTimeout(searchTimeout);
-        searchTimeout = setTimeout(() => {
-          const keyword = searchInput.value.trim().toLowerCase();
-          if (!keyword) {
-            currentList = allData;
-          } else {
-            currentList = allData.filter(item => {
-               return item.b.toLowerCase().includes(keyword); 
-            });
-          }
-          renderer.setData(currentList);
-          updateCount();
-        }, 300);
-      })
-
-      // Jump Logic
-      jumpBtn.addEventListener('click', () => {
-        const value = timeInput.value
-        if (!value) return
-        const target = Math.floor(new Date(value).getTime() / 1000)
-        renderer.scrollToTime(target);
-      })
-
-      // Image Preview (Delegation)
-      container.addEventListener('click', (e) => {
-        const target = e.target;
-        if (target.classList.contains('previewable')) {
-           const full = target.getAttribute('data-full')
-           if (!full) return
-           imagePreviewTarget.src = full
-           imageZoom = 1
-           imagePreviewTarget.style.transform = 'scale(1)'
-           imagePreview.classList.add('active')
-        }
-      });
-
-      imagePreviewTarget.addEventListener('click', (event) => {
-        event.stopPropagation()
-      })
-
-      imagePreviewTarget.addEventListener('dblclick', (event) => {
-        event.stopPropagation()
-        imageZoom = 1
-        imagePreviewTarget.style.transform = 'scale(1)'
-      })
-
-      imagePreviewTarget.addEventListener('wheel', (event) => {
-        event.preventDefault()
-        const delta = event.deltaY > 0 ? -0.1 : 0.1
-        imageZoom = Math.min(3, Math.max(0.5, imageZoom + delta))
-        imagePreviewTarget.style.transform = \`scale(\${imageZoom})\`
-      }, { passive: false })
-
-      imagePreview.addEventListener('click', () => {
-        imagePreview.classList.remove('active')
-        imagePreviewTarget.src = ''
-        imageZoom = 1
-        imagePreviewTarget.style.transform = 'scale(1)'
-      })
-
-      updateCount()
-    </script>
+      ${getDayHtmlPageInitScript()}
+    </script>`}
   </body>
 </html>`);
 

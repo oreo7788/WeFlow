@@ -329,5 +329,27 @@ body {
 .load-sentinel {
   height: 1px;
 }
-`;
 
+.next-day-hint {
+  flex-shrink: 0;
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.next-day-hint:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.next-day-hint.hidden {
+  display: none;
+}
+`;

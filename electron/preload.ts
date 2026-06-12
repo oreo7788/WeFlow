@@ -507,6 +507,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   export: {
     getExportStats: (sessionIds: string[], options: Record<string, unknown>) =>
       ipcRenderer.invoke('export:getExportStats', sessionIds, options),
+    getDayPartitionPreflight: (sessionIds: string[], outputDir: string, options: Record<string, unknown>) =>
+      ipcRenderer.invoke('export:getDayPartitionPreflight', sessionIds, outputDir, options),
     exportSessions: (sessionIds: string[], outputDir: string, options: any, controlOptions?: { taskId?: string }) =>
       ipcRenderer.invoke('export:exportSessions', sessionIds, outputDir, options, controlOptions),
     pauseTask: (taskId: string) =>

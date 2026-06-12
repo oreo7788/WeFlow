@@ -19,6 +19,7 @@ import {
 import { wcdbService } from './wcdbService'
 import { exportRecordService } from './exportRecordService'
 import { chatService } from './chatService'
+import { exportSessionDayPartition, shouldUseDayPartitionExport } from './exportDayPartition/dayPartitionExporter'
 
 type ExportServiceInstance = ExportWriterHost
 
@@ -304,7 +305,9 @@ export const exportSessionsMixin = {
           else if (effectiveOptions.format === 'weclone') ext = '.csv'
           else if (effectiveOptions.format === 'html') ext = '.html'
           const preferredOutputPath = path.join(sessionDir, `${fileNameWithPrefix}${ext}`)
-          const canTrySkipUnchanged = canTrySkipUnchangedTextSessions &&
+          const useDayPartition = shouldUseDayPartitionExport(effectiveOptions)
+          const dayPartitionOutputPath = path.join(sessionDir, 'index.html')
+          const canTrySkipUnchanged = !useDayPartition && canTrySkipUnchangedTextSessions &&
             typeof messageCountHint === 'number' &&
             messageCountHint >= 0 &&
             typeof latestTimestampHint === 'number' &&
@@ -337,12 +340,24 @@ export const exportSessionsMixin = {
             }
           }
 
-          const outputPath = fileNamingMode === 'date-range'
-            ? await this.reserveUniqueOutputPath(preferredOutputPath, reservedOutputPaths)
-            : preferredOutputPath
+          const outputPath = useDayPartition
+            ? dayPartitionOutputPath
+            : fileNamingMode === 'date-range'
+              ? await this.reserveUniqueOutputPath(preferredOutputPath, reservedOutputPaths)
+              : preferredOutputPath
 
           let result: { success: boolean; error?: string }
-          if (effectiveOptions.format === 'json' || effectiveOptions.format === 'arkme-json') {
+          if (useDayPartition) {
+            result = await exportSessionDayPartition(
+              this,
+              sessionId,
+              sessionDir,
+              sessionInfo.displayName,
+              effectiveOptions,
+              sessionProgress,
+              control
+            )
+          } else if (effectiveOptions.format === 'json' || effectiveOptions.format === 'arkme-json') {
             result = await this.exportSessionToDetailedJson(sessionId, outputPath, effectiveOptions, sessionProgress, control)
           } else if (effectiveOptions.format === 'chatlab' || effectiveOptions.format === 'chatlab-jsonl') {
             result = await this.exportSessionToChatLab(sessionId, outputPath, effectiveOptions, sessionProgress, control)

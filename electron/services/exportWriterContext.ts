@@ -39,6 +39,7 @@ export interface ExportWriterHost {
   exportSessionToExcel(...args: any[]): any
   exportSessionToExcelStreaming(...args: any[]): any
   exportSessionToHtml(...args: any[]): any
+  exportSessionDayToHtml(...args: any[]): any
   exportSessionToTxt(...args: any[]): any
   exportSessionToWeCloneCsv(...args: any[]): any
   extractArkmeAppMessageMeta(...args: any[]): any

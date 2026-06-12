@@ -35,7 +35,7 @@ import {
   X
 } from 'lucide-react'
 import type { ChatSession as AppChatSession, ContactInfo } from '../types/models'
-import type { ExportOptions as ElectronExportOptions, ExportProgress } from '../types/electron'
+import type { ExportOptions as ElectronExportOptions, ExportProgress, DayPartitionPreflightResult } from '../types/electron'
 import type { BackgroundTaskRecord } from '../types/backgroundTask'
 import {
   BACKGROUND_TASK_ACTIVE_STATUSES,
@@ -120,6 +120,10 @@ interface ExportOptions {
   txtColumns: string[]
   displayNamePreference: DisplayNamePreference
   exportConcurrency: number
+  htmlPartition: 'single' | 'day'
+  skipUnchangedDays: boolean
+  validateAllDays: boolean
+  dayArchiveOldMonths: boolean
 }
 
 interface SessionRow extends AppChatSession {
@@ -948,6 +952,29 @@ const AUTOMATION_RANGE_OPTIONS: Array<{ mode: AutomationRangeMode; label: string
 const AUTOMATION_LAST_N_DAYS_MIN = 1
 const AUTOMATION_LAST_N_DAYS_MAX = 3650
 const AUTOMATION_LAST_N_DAYS_DEFAULT = 3
+
+const normalizeHtmlDayPartitionAutomationTemplate = (
+  template: Omit<ElectronExportOptions, 'dateRange'>
+): Omit<ElectronExportOptions, 'dateRange'> => {
+  const exportMediaEnabled = Boolean(
+    template.exportMedia ||
+    template.exportImages ||
+    template.exportVoices ||
+    template.exportVideos ||
+    template.exportEmojis ||
+    template.exportFiles
+  )
+  if (template.format !== 'html' || !exportMediaEnabled) return template
+  return {
+    ...template,
+    htmlPartition: template.htmlPartition || 'day',
+    skipUnchangedDays: template.skipUnchangedDays !== false,
+    validateAllDays: template.validateAllDays === true,
+    exportWriteLayout: 'C',
+    sessionLayout: 'per-session',
+    sessionNameWithTypePrefix: template.sessionNameWithTypePrefix !== false
+  }
+}
 
 const normalizeAutomationLastNDays = (value: unknown): number => {
   const parsed = Math.floor(Number(value) || 0)
@@ -2347,6 +2374,8 @@ function ExportPage() {
   const [snsExportLivePhotos, setSnsExportLivePhotos] = useState(false)
   const [snsExportVideos, setSnsExportVideos] = useState(false)
   const [isTimeRangeDialogOpen, setIsTimeRangeDialogOpen] = useState(false)
+  const [dayPartitionPreflight, setDayPartitionPreflight] = useState<DayPartitionPreflightResult | null>(null)
+  const [dayPartitionPreflightLoading, setDayPartitionPreflightLoading] = useState(false)
   const [isResolvingTimeRangeBounds, setIsResolvingTimeRangeBounds] = useState(false)
   const [timeRangeBounds, setTimeRangeBounds] = useState<TimeRangeBounds | null>(null)
   const [isExportDefaultsModalOpen, setIsExportDefaultsModalOpen] = useState(false)
@@ -2385,7 +2414,11 @@ function ExportPage() {
     excelCompactColumns: true,
     txtColumns: defaultTxtColumns,
     displayNamePreference: 'remark',
-    exportConcurrency: 2
+    exportConcurrency: 2,
+    htmlPartition: 'single',
+    skipUnchangedDays: true,
+    validateAllDays: false,
+    dayArchiveOldMonths: false
   })
 
   const exportStatsRangeOptions = useMemo(() => {
@@ -5277,7 +5310,11 @@ function ExportPage() {
               start: Math.floor(sourceOptions.dateRange.start.getTime() / 1000),
               end: Math.floor(sourceOptions.dateRange.end.getTime() / 1000)
             }
-          : null
+          : null,
+      htmlPartition: sourceOptions.htmlPartition,
+      skipUnchangedDays: sourceOptions.skipUnchangedDays,
+      validateAllDays: sourceOptions.validateAllDays,
+      dayArchiveOldMonths: sourceOptions.dayArchiveOldMonths
     }
 
     if (scope === 'content' && contentType) {
@@ -6085,6 +6122,7 @@ function ExportPage() {
         }
     return {
       ...task.template.optionTemplate,
+      ...normalizeHtmlDayPartitionAutomationTemplate(task.template.optionTemplate),
       exportWriteLayout: task.template.optionTemplate.exportWriteLayout || writeLayout,
       dateRange
     }
@@ -6217,7 +6255,8 @@ function ExportPage() {
         window.alert('自动化任务仅支持会话导出')
         return
       }
-      const { dateRange: _discard, ...optionTemplate } = exportOptions
+      const { dateRange: _discard, ...optionTemplateRaw } = exportOptions
+      const optionTemplate = normalizeHtmlDayPartitionAutomationTemplate(optionTemplateRaw)
       const normalizedRangeSelection = cloneExportDateRangeSelection(effectiveRangeSelection)
       const scope = exportDialog.scope === 'single'
         ? 'single'
@@ -6239,7 +6278,13 @@ function ExportPage() {
         scope,
         contentType: scope === 'content' ? exportDialog.contentType : undefined,
         optionTemplate,
-        dateRangeConfig: serializeExportDateRangeConfig(normalizedRangeSelection),
+        dateRangeConfig: optionTemplate.htmlPartition === 'day' && normalizedRangeSelection.useAllTime
+          ? {
+              version: 1,
+              relativeMode: 'last-n-days',
+              relativeDays: AUTOMATION_LAST_N_DAYS_DEFAULT
+            }
+          : serializeExportDateRangeConfig(normalizedRangeSelection),
         intervalDays: 1,
         intervalHours: 0,
         firstTriggerAtEnabled: false,
@@ -8027,6 +8072,82 @@ function ExportPage() {
   const useCollapsedSessionFormatSelector = isSessionScopeDialog || isContentTextDialog
   const shouldShowFormatSection = !isContentScopeDialog || isContentTextDialog
   const shouldShowMediaSection = !isContentScopeDialog
+  const exportMediaEnabledForDialog = Boolean(
+    options.exportImages ||
+    options.exportVoices ||
+    options.exportVideos ||
+    options.exportEmojis ||
+    options.exportFiles
+  )
+  const shouldShowHtmlPartitionSection = exportDialog.scope !== 'sns'
+    && options.format === 'html'
+    && exportMediaEnabledForDialog
+
+  useEffect(() => {
+    if (!exportDialog.open || exportDialog.scope === 'sns') {
+      setDayPartitionPreflight(null)
+      setDayPartitionPreflightLoading(false)
+      return
+    }
+    if (
+      options.htmlPartition !== 'day' ||
+      !exportMediaEnabledForDialog ||
+      !exportFolder ||
+      exportDialog.sessionIds.length === 0
+    ) {
+      setDayPartitionPreflight(null)
+      setDayPartitionPreflightLoading(false)
+      return
+    }
+
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        setDayPartitionPreflightLoading(true)
+        try {
+          const effectiveRangeSelection = resolveDynamicExportSelection(timeRangeSelection, new Date())
+          const effectiveOptionsState: ExportOptions = {
+            ...options,
+            useAllTime: effectiveRangeSelection.useAllTime,
+            dateRange: cloneExportDateRange(effectiveRangeSelection.dateRange)
+          }
+          const exportOptions = buildExportOptions(exportDialog.scope, exportDialog.contentType, effectiveOptionsState)
+          const result = await window.electronAPI.export.getDayPartitionPreflight(
+            exportDialog.sessionIds,
+            exportFolder,
+            exportOptions
+          )
+          if (!cancelled) {
+            setDayPartitionPreflight(result)
+          }
+        } catch {
+          if (!cancelled) {
+            setDayPartitionPreflight(null)
+          }
+        } finally {
+          if (!cancelled) {
+            setDayPartitionPreflightLoading(false)
+          }
+        }
+      })()
+    }, 320)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [
+    buildExportOptions,
+    exportDialog.contentType,
+    exportDialog.open,
+    exportDialog.scope,
+    exportDialog.sessionIds,
+    exportFolder,
+    exportMediaEnabledForDialog,
+    options,
+    timeRangeSelection
+  ])
+
   const avatarExportStatusLabel = options.exportAvatars ? '已开启聊天消息导出带头像' : '已关闭聊天消息导出带头像'
   const contentTextDialogSummary = '此模式只导出聊天文本，不包含图片语音视频表情包等多媒体文件。'
   const activeDialogFormatLabel = exportDialog.scope === 'sns'
@@ -10509,6 +10630,111 @@ function ExportPage() {
                       <span className="time-range-arrow">&gt;</span>
                     </button>
                   </div>
+                </div>
+              )}
+
+              {shouldShowHtmlPartitionSection && (
+                <div className="dialog-section">
+                  <h4>HTML 导出方式</h4>
+                  <div className="display-name-options" role="radiogroup" aria-label="HTML 导出方式">
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={options.htmlPartition === 'single'}
+                      className={`display-name-item ${options.htmlPartition === 'single' ? 'active' : ''}`}
+                      onClick={() => setOptions(prev => ({ ...prev, htmlPartition: 'single' }))}
+                    >
+                      <span>单文件</span>
+                      <small>兼容旧版单 HTML；若已有按天导出目录，请继续选「按天分区」</small>
+                    </button>
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={options.htmlPartition === 'day'}
+                      className={`display-name-item ${options.htmlPartition === 'day' ? 'active' : ''}`}
+                      onClick={() => {
+                        if (writeLayout !== 'C') {
+                          setWriteLayout('C')
+                        }
+                        setOptions(prev => ({ ...prev, htmlPartition: 'day' }))
+                      }}
+                    >
+                      <span>按天分区（推荐）</span>
+                      <small>一天一个 HTML，支持按天增量更新</small>
+                    </button>
+                  </div>
+                  {options.htmlPartition === 'day' && (
+                    <>
+                      <div className="format-note" style={{ marginTop: '12px' }}>
+                        按天分区会将聊天记录按日期拆分为多个 HTML 文件，再次导出时仅重建选定日期范围内的天文件，并更新总览页。输出目录需与上次一致，且使用布局 C（每会话一个目录）。若此前为单文件 HTML 导出，首次切换需重新全量导出以生成 manifest 与 days 目录。
+                      </div>
+                      <div className="dialog-switch-row" style={{ marginTop: '12px' }}>
+                        <div className="dialog-switch-copy">
+                          <h4>跳过未变化的天</h4>
+                          <div className="format-note">开启后，选中日期范围内无新消息的天将自动跳过。</div>
+                        </div>
+                        <button
+                          type="button"
+                          className={`dialog-switch ${options.skipUnchangedDays ? 'on' : ''}`}
+                          aria-pressed={options.skipUnchangedDays}
+                          aria-label="切换跳过未变化的天"
+                          onClick={() => setOptions(prev => ({ ...prev, skipUnchangedDays: !prev.skipUnchangedDays }))}
+                        >
+                          <span className="dialog-switch-thumb" />
+                        </button>
+                      </div>
+                      <div className="dialog-switch-row">
+                        <div className="dialog-switch-copy">
+                          <h4>校验并修复</h4>
+                          <div className="format-note">对比数据库与 manifest，重建不一致的天。</div>
+                        </div>
+                        <button
+                          type="button"
+                          className={`dialog-switch ${options.validateAllDays ? 'on' : ''}`}
+                          aria-pressed={options.validateAllDays}
+                          aria-label="切换校验并修复"
+                          onClick={() => setOptions(prev => ({ ...prev, validateAllDays: !prev.validateAllDays }))}
+                        >
+                          <span className="dialog-switch-thumb" />
+                        </button>
+                      </div>
+                      <div className="dialog-switch-row">
+                        <div className="dialog-switch-copy">
+                          <h4>归档 12 个月前的月份</h4>
+                          <div className="format-note">将早于 12 个月且状态稳定的天打包到 archives/YYYY-MM.zip，并释放磁盘空间。</div>
+                        </div>
+                        <button
+                          type="button"
+                          className={`dialog-switch ${options.dayArchiveOldMonths ? 'on' : ''}`}
+                          aria-pressed={options.dayArchiveOldMonths}
+                          aria-label="切换月归档压缩"
+                          onClick={() => setOptions(prev => ({ ...prev, dayArchiveOldMonths: !prev.dayArchiveOldMonths }))}
+                        >
+                          <span className="dialog-switch-thumb" />
+                        </button>
+                      </div>
+                      <div className="day-partition-preflight" style={{ marginTop: '12px' }}>
+                        <div className="format-note" style={{ marginBottom: '8px' }}>导出前预检</div>
+                        {dayPartitionPreflightLoading ? (
+                          <div className="format-note">正在分析可跳过 / 需重建的天...</div>
+                        ) : dayPartitionPreflight?.success ? (
+                          <div className="format-note">
+                            目标 {dayPartitionPreflight.targetDays.length} 天 × {exportDialog.sessionIds.length} 会话 = {dayPartitionPreflight.totalDaySlots} 天次；
+                            可跳过 {dayPartitionPreflight.skipDaySlots} 天次，
+                            需重建 {dayPartitionPreflight.rebuildDaySlots} 天次
+                            {dayPartitionPreflight.emptyDaySlots > 0 ? `，空天清理 ${dayPartitionPreflight.emptyDaySlots} 天次` : ''}
+                            {dayPartitionPreflight.sessionsWithoutManifest > 0 ? `；${dayPartitionPreflight.sessionsWithoutManifest} 个会话需初始化 manifest` : ''}
+                            {dayPartitionPreflight.sessionsWithOptionsMismatch > 0 ? `；${dayPartitionPreflight.sessionsWithOptionsMismatch} 个会话选项不匹配需全量重建` : ''}
+                            。预计耗时 {dayPartitionPreflight.estimatedMinutesLabel}。
+                          </div>
+                        ) : dayPartitionPreflight?.error ? (
+                          <div className="format-note">{dayPartitionPreflight.error}</div>
+                        ) : (
+                          <div className="format-note">请选择输出目录与时间范围后查看预检结果。</div>
+                        )}
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
 

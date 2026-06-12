@@ -132,6 +132,20 @@ export interface ExportOptions {
   sessionNameWithTypePrefix?: boolean
   displayNamePreference?: 'group-nickname' | 'remark' | 'nickname'
   exportConcurrency?: number
+  /** HTML 分区策略（仅 HTML+媒体） */
+  htmlPartition?: 'single' | 'day'
+  /** 按天模式下：是否跳过未变化的天 */
+  skipUnchangedDays?: boolean
+  /** 按天模式下：是否校验修复所有天 */
+  validateAllDays?: boolean
+  /** 显式目标日期列表（由 dateRange 解析而来） */
+  targetDays?: string[]
+  /** 按天导出时的目标日期 YYYY-MM-DD（内部使用） */
+  dayExportDay?: string
+  /** 按天导出时的会话目录（内部使用） */
+  dayExportSessionDir?: string
+  /** 按天导出完成后归档早于 N 月的旧月份 */
+  dayArchiveOldMonths?: boolean
 }
 
 export const TXT_COLUMN_DEFINITIONS: Array<{ id: string; label: string }> = [

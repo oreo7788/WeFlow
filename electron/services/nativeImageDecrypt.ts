@@ -220,6 +220,14 @@ function detectImageFormat(buffer: Buffer): string | null {
   if (buffer[0] === 0x42 && buffer[1] === 0x4D) {
     return 'bmp'
   }
+  // TIFF BE: MM 00 2A
+  if (buffer[0] === 0x4D && buffer[1] === 0x4D && buffer[2] === 0x00 && buffer[3] === 0x2A) {
+    return 'tif'
+  }
+  // TIFF LE: II 2A 00
+  if (buffer[0] === 0x49 && buffer[1] === 0x49 && buffer[2] === 0x2A && buffer[3] === 0x00) {
+    return 'tif'
+  }
   // wxgf: wxgf
   if (buffer[0] === 0x77 && buffer[1] === 0x78 && buffer[2] === 0x67 && buffer[3] === 0x66) {
     return 'wxgf'
@@ -269,8 +277,14 @@ export function decryptDatViaNative(
     const rawExt = typeof result.ext === 'string' && result.ext.trim()
       ? result.ext.trim().toLowerCase()
       : ''
-    const ext = rawExt ? (rawExt.startsWith('.') ? rawExt : `.${rawExt}`) : ''
-    console.log(`[✅ Native成功 #${nativeDecryptCount}] ${fileName} -> ${ext}${isWxgf ? '(wxgf)' : ''}`)
+    let ext = rawExt ? (rawExt.startsWith('.') ? rawExt : `.${rawExt}`) : ''
+    if (!ext) {
+      const inferred = detectImageFormat(result.data)
+      if (inferred) {
+        ext = `.${inferred}`
+      }
+    }
+    console.log(`[✅ Native成功 #${nativeDecryptCount}] ${fileName} -> ${ext || '(未知)'}${isWxgf ? '(wxgf)' : ''}`)
     const meta: NativeDatMeta = {
       version: result.version,
       aes_size: result.aes_size ?? result.aesSize,

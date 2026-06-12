@@ -19,6 +19,7 @@ pub enum ImageFormat {
     Gif,
     Webp,
     Bmp,
+    Tiff,
     Unknown,
 }
 
@@ -41,6 +42,10 @@ impl ImageFormat {
             [0x52, 0x49, 0x46, 0x46, _, _, _, _, 0x57, 0x45, 0x42, 0x50] => Self::Webp,
             // BMP: BM
             [0x42, 0x4D, ..] => Self::Bmp,
+            // TIFF BE: MM 00 2A
+            [0x4D, 0x4D, 0x00, 0x2A, ..] => Self::Tiff,
+            // TIFF LE: II 2A 00
+            [0x49, 0x49, 0x2A, 0x00, ..] => Self::Tiff,
             _ => Self::Unknown,
         }
     }
@@ -53,6 +58,7 @@ impl ImageFormat {
             Self::Gif => "gif",
             Self::Webp => "webp",
             Self::Bmp => "bmp",
+            Self::Tiff => "tif",
             Self::Unknown => "bin",
         }
     }

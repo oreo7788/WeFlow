@@ -8,6 +8,7 @@ import crypto from 'crypto'
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
 import { fileLogService } from '../utils/fileLogService'
+import sharp from 'sharp'
 import { decryptDatViaNative, nativeAddonLocation } from './nativeImageDecrypt'
 import { IMAGE_HARDLINK_PRELOAD_BATCH_SIZE } from '../constants/imageDecrypt'
 
@@ -562,7 +563,9 @@ export class ImageDecryptService {
         }
       }
 
-      const finalExt = detectedExt
+      const normalized = await this.normalizeDecodedImageBuffer(decrypted, detectedExt)
+      decrypted = normalized.data
+      const finalExt = normalized.ext
 
       const outputPath = this.getCacheOutputPathFromDat(datPath, finalExt, payload.sessionId)
       this.emitDecryptProgress(payload, cacheKey, 'writing', 90, 'running')
@@ -1864,7 +1867,44 @@ export class ImageDecryptService {
       buffer[8] === 0x57 && buffer[9] === 0x45 && buffer[10] === 0x42 && buffer[11] === 0x50) {
       return '.webp'
     }
+    if (buffer[0] === 0x42 && buffer[1] === 0x4d) return '.bmp'
+    if (buffer[0] === 0x4d && buffer[1] === 0x4d && buffer[2] === 0x00 && buffer[3] === 0x2a) return '.tif'
+    if (buffer[0] === 0x49 && buffer[1] === 0x49 && buffer[2] === 0x2a && buffer[3] === 0x00) return '.tif'
     return null
+  }
+
+  private async normalizeDecodedImageBuffer(
+    buffer: Buffer,
+    ext: string
+  ): Promise<{ data: Buffer; ext: string }> {
+    const normalizedExt = ext.toLowerCase()
+    if (
+      normalizedExt === '.jpg' ||
+      normalizedExt === '.jpeg' ||
+      normalizedExt === '.png' ||
+      normalizedExt === '.gif' ||
+      normalizedExt === '.webp'
+    ) {
+      return { data: buffer, ext: normalizedExt === '.jpeg' ? '.jpg' : normalizedExt }
+    }
+
+    if (normalizedExt === '.tif' || normalizedExt === '.tiff' || normalizedExt === '.bmp') {
+      try {
+        const jpg = await sharp(buffer).jpeg({ quality: 92 }).toBuffer()
+        if (jpg.length > 0) {
+          this.logInfo('非 Web 友好图片格式已转为 JPEG', {
+            sourceExt: normalizedExt,
+            inputSize: buffer.length,
+            outputSize: jpg.length
+          })
+          return { data: jpg, ext: '.jpg' }
+        }
+      } catch (error) {
+        this.logError('非 Web 友好图片格式转 JPEG 失败', error, { ext: normalizedExt })
+      }
+    }
+
+    return { data: buffer, ext: normalizedExt }
   }
 
   private bufferToDataUrl(buffer: Buffer, ext: string): string | null {

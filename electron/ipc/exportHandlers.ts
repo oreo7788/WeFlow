@@ -19,6 +19,10 @@ export function registerExportHandlers(ctx: MainIpcContext) {
     return exportService.getExportStats(sessionIds, options)
   })
 
+  ipcMain.handle('export:getDayPartitionPreflight', async (_, sessionIds: string[], outputDir: string, options: ExportOptions) => {
+    return exportService.getDayPartitionPreflight(sessionIds, outputDir, options)
+  })
+
   ipcMain.handle('export:pauseTask', async (_, taskId: string) => {
     const normalizedTaskId = normalizeExportTaskId(taskId)
     if (!normalizedTaskId) return { success: false, error: '缺少导出任务 ID' }

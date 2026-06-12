@@ -106,6 +106,7 @@ import { exportJsonMixin } from './exportJsonWriter'
 import { exportExcelMixin } from './exportExcelWriter'
 import { exportTxtMixin } from './exportTxtWriter'
 import { exportWeCloneMixin } from './exportWeCloneWriter'
+import { getDayPartitionPreflight, type DayPartitionPreflightResult } from './exportDayPartition/dayPreflightService'
 import { exportHtmlMixin } from './exportHtmlWriter'
 import { exportSessionsMixin } from './exportSessionsWriter'
 import { decodeMessageContent, sanitizeQuotedContent } from './chat/messageParsing'
@@ -3867,6 +3868,15 @@ export class ExportService {
   } {
     const exportMediaEnabled = options.exportMedia === true &&
       Boolean(options.exportImages || options.exportVoices || options.exportVideos || options.exportEmojis || options.exportFiles)
+    const dayExportDay = String(options.dayExportDay || '').trim()
+    if (options.htmlPartition === 'day' && dayExportDay) {
+      const sessionDir = String(options.dayExportSessionDir || '').trim() || path.dirname(path.dirname(outputPath))
+      return {
+        exportMediaEnabled,
+        mediaRootDir: sessionDir,
+        mediaRelativePrefix: 'media'
+      }
+    }
     const outputDir = path.dirname(outputPath)
     const writeLayout = this.resolveExportWriteLayout(options)
     // A: type-first layout, text exports are placed under `texts/`, media is placed at sibling type directories.
@@ -7437,6 +7447,10 @@ export class ExportService {
     return exportHtmlMixin.exportSessionToHtml.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
   }
 
+  async exportSessionDayToHtml(...args: Parameters<typeof exportHtmlMixin.exportSessionDayToHtml>): ReturnType<typeof exportHtmlMixin.exportSessionDayToHtml> {
+    return exportHtmlMixin.exportSessionDayToHtml.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
+  }
+
   async exportSessionToChatLab(...args: Parameters<typeof exportChatLabMixin.exportSessionToChatLab>): ReturnType<typeof exportChatLabMixin.exportSessionToChatLab> {
     return exportChatLabMixin.exportSessionToChatLab.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
   }
@@ -7459,6 +7473,19 @@ export class ExportService {
 
   async exportSessionToWeCloneCsv(...args: Parameters<typeof exportWeCloneMixin.exportSessionToWeCloneCsv>): ReturnType<typeof exportWeCloneMixin.exportSessionToWeCloneCsv> {
     return exportWeCloneMixin.exportSessionToWeCloneCsv.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
+  }
+
+  async getDayPartitionPreflight(
+    sessionIds: string[],
+    outputDir: string,
+    options: ExportOptions
+  ): Promise<DayPartitionPreflightResult> {
+    return getDayPartitionPreflight(
+      this as unknown as import('./exportWriterContext').ExportWriterHost,
+      sessionIds,
+      outputDir,
+      options
+    )
   }
 }
 

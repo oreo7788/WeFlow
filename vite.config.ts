@@ -114,7 +114,8 @@ export default defineConfig({
                 'node-llama-cpp',
                 '@vscode/sudo-prompt',
                 'silk-wasm',
-                'ffmpeg-static'
+                'ffmpeg-static',
+                'sharp'
               ]
             }
           }
@@ -225,7 +226,8 @@ export default defineConfig({
                 'fsevents',
                 'exceljs',
                 'ffmpeg-static',
-                'silk-wasm'
+                'silk-wasm',
+                'sharp'
               ],
               output: {
                 entryFileNames: 'exportWorker.js',

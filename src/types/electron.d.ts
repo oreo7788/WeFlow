@@ -1367,6 +1367,7 @@ export interface ElectronAPI {
       estimatedSeconds: number
       sessions: Array<{ sessionId: string; displayName: string; totalCount: number; voiceCount: number }>
     }>
+    getDayPartitionPreflight: (sessionIds: string[], outputDir: string, options: ExportOptions) => Promise<DayPartitionPreflightResult>
     exportSessions: (sessionIds: string[], outputDir: string, options: ExportOptions, controlOptions?: { taskId?: string }) => Promise<{
       success: boolean
       successCount?: number
@@ -1594,6 +1595,37 @@ export interface ExportOptions {
   sessionNameWithTypePrefix?: boolean
   displayNamePreference?: 'group-nickname' | 'remark' | 'nickname'
   exportConcurrency?: number
+  htmlPartition?: 'single' | 'day'
+  skipUnchangedDays?: boolean
+  validateAllDays?: boolean
+  targetDays?: string[]
+  dayExportDay?: string
+  dayExportSessionDir?: string
+  dayArchiveOldMonths?: boolean
+}
+
+export interface DayPartitionPreflightResult {
+  success: boolean
+  targetDays: string[]
+  totalDaySlots: number
+  skipDaySlots: number
+  rebuildDaySlots: number
+  emptyDaySlots: number
+  sessionsWithoutManifest: number
+  sessionsWithOptionsMismatch: number
+  estimatedSeconds: number
+  estimatedMinutesLabel: string
+  sessions: Array<{
+    sessionId: string
+    sessionName: string
+    hasManifest: boolean
+    optionsMismatch: boolean
+    skipDays: number
+    rebuildDays: number
+    emptyDays: number
+    rebuildMessages: number
+  }>
+  error?: string
 }
 
 export interface ExportProgress {

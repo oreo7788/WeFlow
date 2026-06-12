@@ -620,6 +620,192 @@ export function getVirtualScrollScript(): string {
   `;
 }
 
+export function getDayHtmlPageInitScript(): string {
+  return `
+      const searchInput = document.getElementById('searchInput')
+      const timeInput = document.getElementById('timeInput')
+      const jumpBtn = document.getElementById('jumpBtn')
+      const resultCount = document.getElementById('resultCount')
+      const imagePreview = document.getElementById('imagePreview')
+      const imagePreviewTarget = document.getElementById('imagePreviewTarget')
+      const container = document.getElementById('scrollContainer')
+      let imageZoom = 1
+
+      let allData = window.WEFLOW_DATA || [];
+      let currentList = allData;
+
+      const renderItem = (item, index) => {
+         const isSenderMe = item.s === 1;
+         const platformIdAttr = item.p ? \` data-platform-message-id="\${item.p}"\` : '';
+         const replyToAttr = item.r ? \` data-reply-to-message-id="\${item.r}"\` : '';
+         return \`
+          <div class="message \${isSenderMe ? 'sent' : 'received'}" data-index="\${item.i}"\${platformIdAttr}\${replyToAttr}>
+            <div class="message-row">
+              <div class="avatar">\${item.a}</div>
+              <div class="bubble">
+                \${item.b}
+              </div>
+            </div>
+          </div>
+         \`;
+      };
+      
+      const renderer = new ChunkedRenderer(container, currentList, renderItem);
+
+      const updateCount = () => {
+        resultCount.textContent = \`共 \${currentList.length} 条\`
+      }
+
+      let updateNextDayHint = function () {}
+
+      let searchTimeout;
+      searchInput.addEventListener('input', () => {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(() => {
+          const keyword = searchInput.value.trim().toLowerCase();
+          if (!keyword) {
+            currentList = allData;
+          } else {
+            currentList = allData.filter(item => {
+               return item.b.toLowerCase().includes(keyword); 
+            });
+          }
+          renderer.setData(currentList);
+          updateCount();
+          updateNextDayHint();
+        }, 300);
+      })
+
+      jumpBtn.addEventListener('click', () => {
+        const value = timeInput.value
+        if (!value) return
+        const target = Math.floor(new Date(value).getTime() / 1000)
+        renderer.scrollToTime(target);
+      })
+
+      container.addEventListener('click', (e) => {
+        const target = e.target;
+        if (target.classList.contains('previewable')) {
+           const full = target.getAttribute('data-full')
+           if (!full) return
+           imagePreviewTarget.src = full
+           imageZoom = 1
+           imagePreviewTarget.style.transform = 'scale(1)'
+           imagePreview.classList.add('active')
+        }
+      });
+
+      imagePreviewTarget.addEventListener('click', (event) => {
+        event.stopPropagation()
+      })
+
+      imagePreviewTarget.addEventListener('dblclick', (event) => {
+        event.stopPropagation()
+        imageZoom = 1
+        imagePreviewTarget.style.transform = 'scale(1)'
+      })
+
+      imagePreviewTarget.addEventListener('wheel', (event) => {
+        event.preventDefault()
+        const delta = event.deltaY > 0 ? -0.1 : 0.1
+        imageZoom = Math.min(3, Math.max(0.5, imageZoom + delta))
+        imagePreviewTarget.style.transform = \`scale(\${imageZoom})\`
+      }, { passive: false })
+
+      imagePreview.addEventListener('click', () => {
+        imagePreview.classList.remove('active')
+        imagePreviewTarget.src = ''
+        imageZoom = 1
+        imagePreviewTarget.style.transform = 'scale(1)'
+      })
+
+      updateCount()
+
+      // 按天分区：滚动到底后自动进入下一天（导航数据内嵌于页面，兼容 file:// 打开）
+      const dayNavPayload = window.WEFLOW_DAY_NAV || null
+      if (dayNavPayload && dayNavPayload.next && container) {
+        let navigating = false
+        let engaged = false
+        const nextDayHint = document.createElement('div')
+        nextDayHint.className = 'next-day-hint hidden'
+        container.insertAdjacentElement('afterend', nextDayHint)
+
+        const isSearchActive = () => Boolean(searchInput && searchInput.value.trim())
+        const isAllRendered = () => renderer.rendered >= renderer.data.length
+        const needsScroll = () => container.scrollHeight > container.clientHeight + 8
+        const isAtBottom = (threshold = 32) => (
+          container.scrollTop + container.clientHeight >= container.scrollHeight - threshold
+        )
+
+        const goNextDay = () => {
+          if (!dayNavPayload.next || navigating || isSearchActive()) return
+          navigating = true
+          nextDayHint.textContent = '正在进入 ' + (dayNavPayload.nextLabel || '') + '...'
+          nextDayHint.classList.remove('hidden')
+          window.location.href = dayNavPayload.next
+        }
+
+        const updateNextDayHintImpl = () => {
+          if (!dayNavPayload.next || isSearchActive() || !isAllRendered()) {
+            nextDayHint.classList.add('hidden')
+            return
+          }
+          const showHint = !needsScroll() || (engaged && isAtBottom(96))
+          if (!showHint) {
+            nextDayHint.classList.add('hidden')
+            return
+          }
+          nextDayHint.textContent = needsScroll()
+            ? ('继续滚动进入 ' + dayNavPayload.nextLabel + '，或点击此处')
+            : ('进入下一天 ' + dayNavPayload.nextLabel + ' →')
+          nextDayHint.classList.remove('hidden')
+        }
+        updateNextDayHint = updateNextDayHintImpl
+
+        const tryAutoNav = () => {
+          if (isSearchActive() || !isAllRendered() || !dayNavPayload.next) return
+          if (!needsScroll()) return
+          if (!engaged || !isAtBottom(24)) return
+          goNextDay()
+        }
+
+        nextDayHint.addEventListener('click', goNextDay)
+
+        container.addEventListener('scroll', () => {
+          engaged = true
+          updateNextDayHint()
+          tryAutoNav()
+        }, { passive: true })
+
+        container.addEventListener('wheel', (event) => {
+          if (event.deltaY <= 0) return
+          engaged = true
+          updateNextDayHint()
+          tryAutoNav()
+        }, { passive: true })
+
+        const originalRenderBatch = renderer.renderBatch.bind(renderer)
+        renderer.renderBatch = function () {
+          originalRenderBatch()
+          updateNextDayHint()
+          tryAutoNav()
+        }
+
+        if (renderer.sentinel && typeof IntersectionObserver !== 'undefined') {
+          const bottomObserver = new IntersectionObserver((entries) => {
+            if (!entries[0] || !entries[0].isIntersecting) return
+            if (!isAllRendered()) return
+            if (needsScroll() && !engaged) return
+            tryAutoNav()
+          }, { root: container, threshold: 0.01 })
+          bottomObserver.observe(renderer.sentinel)
+        }
+
+        updateNextDayHintImpl()
+      }
+  `
+}
+
 /**
  * 导出单个会话为 HTML 格式
  */
