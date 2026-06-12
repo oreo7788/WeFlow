@@ -275,7 +275,7 @@ async function prepareMessages(
 
     if (!isMe) {
       // 从缓存或查询获取
-      if (sessionInfo.members.has(sender)) {
+      if (sessionInfo.members?.has(sender)) {
         const member = sessionInfo.members.get(sender)!
         displayName = member.nickname
         groupNickname = member.groupNickname

@@ -27,7 +27,7 @@ export interface Message {
   isSend: number | null
   senderUsername: string | null
   parsedContent: string
-  rawContent: string
+  rawContent?: string
   content?: string  // 原始XML内容（与rawContent相同，供前端使用）
   emojiCdnUrl?: string
   emojiMd5?: string

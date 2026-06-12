@@ -147,6 +147,7 @@ process.env.WEFLOW_PROJECT_NAME = process.env.WEFLOW_PROJECT_NAME || 'WeFlow'
 
 async function run() {
   const { wcdbService } = await import('./services/wcdbService')
+  const { exportService } = await import('./services/exportService')
   wcdbService.setPaths(config.resourcesPath || '', config.userDataPath || '')
   wcdbService.setLogEnabled(config.logEnabled === true)
   exportService.setRuntimeConfig({
@@ -190,15 +191,6 @@ async function run() {
       (config.options || { format: 'json', exportAvatars: false, contactTypes: { friends: true, groups: true, officials: true } }) as ContactExportOptions
     )
   } else {
-    const { exportService } = await import('./services/exportService')
-    exportService.setRuntimeConfig({
-      dbPath: config.dbPath,
-      decryptKey: config.decryptKey,
-      myWxid: config.myWxid,
-      imageXorKey: config.imageXorKey,
-      imageAesKey: config.imageAesKey
-    })
-
     if (config.mode === 'single') {
       result = await exportService.exportSessionToChatLab(
         String(config.sessionId || '').trim(),

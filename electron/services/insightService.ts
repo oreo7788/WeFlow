@@ -886,23 +886,23 @@ ${topMentionText}
     let afterMessages: Message[] = []
     let contextReadError = ''
     try {
-      const aroundResult = await chatService.getMessagesAround(
-        sessionId,
-        { localId: targetLocalId, createTime: targetCreateTime, messageKey: targetMessageKey },
-        contextCount
-      )
-      if (aroundResult.success) {
-        beforeMessages = aroundResult.before || []
-        afterMessages = aroundResult.after || []
-      } else {
-        contextReadError = aroundResult.error || '读取上下文失败'
+      // 获取目标消息前后的消息作为上下文
+      // 先获取目标消息之前的消息
+      const beforeResult = await chatService.getMessages(sessionId, 0, contextCount, undefined, targetCreateTime, false)
+      if (beforeResult.success && beforeResult.messages) {
+        beforeMessages = beforeResult.messages.reverse() // 按时间顺序排列
+      }
+      // 再获取目标消息之后的消息
+      const afterResult = await chatService.getMessages(sessionId, 0, contextCount, targetCreateTime, undefined, true)
+      if (afterResult.success && afterResult.messages) {
+        afterMessages = afterResult.messages
       }
     } catch (error) {
       contextReadError = (error as Error).message || String(error)
     }
 
     const formatLine = (message: Message) => {
-      const senderName = message.isSend === 1 ? '我' : (message.senderDisplayName || targetSenderName || displayName)
+      const senderName = message.isSend === 1 ? '我' : (targetSenderName || displayName)
       return `${this.formatInsightMessageTimestamp(message.createTime)} ${senderName}：${this.formatInsightMessageContent(message)}`
     }
     const beforeText = beforeMessages.length > 0 ? beforeMessages.map(formatLine).join('\n') : '无'

@@ -2052,7 +2052,7 @@ class HttpService {
     const xmlType = String(msg.xmlType || '').trim()
     if (xmlType) return xmlType
 
-    const extractedType = this.extractType49Subtype(msg.rawContent)
+    const extractedType = this.extractType49Subtype(msg.rawContent || '')
     if (extractedType) return extractedType
 
     switch (msg.appMsgKind) {
@@ -2082,7 +2082,7 @@ class HttpService {
 
   private getType49Content(msg: Message, quoteInfo?: ApiQuoteInfo): string {
     const subtype = this.resolveType49Subtype(msg)
-    const title = msg.linkTitle || msg.fileName || this.extractAppMessageTitle(msg.rawContent) || ''
+    const title = msg.linkTitle || msg.fileName || this.extractAppMessageTitle(msg.rawContent || '') || ''
 
     switch (subtype) {
       case '5':
@@ -2123,7 +2123,7 @@ class HttpService {
     }
 
     if (this.isReplyMessage(msg, quoteInfo)) {
-      return msg.parsedContent || quoteInfo?.replyText || this.extractAppMessageTitle(msg.rawContent) || '[引用消息]'
+      return msg.parsedContent || quoteInfo?.replyText || this.extractAppMessageTitle(msg.rawContent || '') || '[引用消息]'
     }
 
     // 优先使用已解析的内容

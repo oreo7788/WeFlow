@@ -5031,7 +5031,7 @@ export class ExportService {
 
       // ========== 获取群昵称并更新到 memberSet ==========
       const groupNicknameCandidates = isGroup
-        ? this.buildGroupNicknameIdCandidates([
+        ? buildGroupNicknameIdCandidates([
           ...Array.from(collected.memberSet.keys()),
           ...allMessages.map(msg => msg.senderUsername),
           cleanedMyWxid
@@ -5086,11 +5086,11 @@ export class ExportService {
         })
 
         // 并行导出媒体，并发数跟随导出设置
-        const mediaConcurrency = this.getClampedConcurrency(options.exportConcurrency)
+        const mediaConcurrency = getClampedConcurrency(options.exportConcurrency)
         let mediaExported = 0
         await parallelLimit(mediaMessages, mediaConcurrency, async (msg) => {
           this.throwIfStopRequested(control)
-          const mediaKey = this.getMediaCacheKey(msg)
+          const mediaKey = getMediaCacheKey(msg)
           if (!mediaCache.has(mediaKey)) {
             const mediaItem = await this.exportMediaForMessage(msg, sessionId, mediaRootDir, mediaRelativePrefix, {
               exportImages: options.exportImages,
@@ -5147,7 +5147,7 @@ export class ExportService {
         await parallelLimit(voiceMessages, VOICE_CONCURRENCY, async (msg) => {
           this.throwIfStopRequested(control)
           const transcript = await this.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername)
-          voiceTranscriptMap.set(this.getStableMessageKey(msg), transcript)
+          voiceTranscriptMap.set(getStableMessageKey(msg), transcript)
           voiceTranscribed++
           onProgress?.({
             current: 40,
@@ -5212,11 +5212,11 @@ export class ExportService {
 
         // 确定消息内容
         let content: string | null
-        const mediaKey = this.getMediaCacheKey(msg)
+        const mediaKey = getMediaCacheKey(msg)
         const mediaItem = mediaCache.get(mediaKey)
         if (msg.localType === 34 && options.exportVoiceAsText) {
           // 使用预先转写的文字
-          content = voiceTranscriptMap.get(this.getStableMessageKey(msg)) || '[语音消息 - 转文字失败]'
+          content = voiceTranscriptMap.get(getStableMessageKey(msg)) || '[语音消息 - 转文字失败]'
         } else if (mediaItem && msg.localType !== 47) {
           content = mediaItem.relativePath
         } else {
@@ -5265,7 +5265,7 @@ export class ExportService {
           content: content
         }
 
-        const platformMessageId = this.normalizeUnsignedIntToken(msg.serverIdRaw ?? msg.serverId)
+        const platformMessageId = normalizeUnsignedIntToken(msg.serverIdRaw ?? msg.serverId)
         if (platformMessageId !== '0') {
           message.platformMessageId = platformMessageId
         }
@@ -5475,10 +5475,10 @@ export class ExportService {
 
       return { success: true }
     } catch (e) {
-      if (this.isStopError(e)) {
+      if (isStopError(e)) {
         return { success: false, error: '导出任务已停止' }
       }
-      if (this.isPauseError(e)) {
+      if (isPauseError(e)) {
         return { success: false, error: '导出任务已暂停' }
       }
       return { success: false, error: String(e) }
@@ -5602,11 +5602,11 @@ export class ExportService {
           estimatedTotalMessages: totalMessages
         })
 
-        const mediaConcurrency = this.getClampedConcurrency(options.exportConcurrency)
+        const mediaConcurrency = getClampedConcurrency(options.exportConcurrency)
         let mediaExported = 0
         await parallelLimit(mediaMessages, mediaConcurrency, async (msg) => {
           this.throwIfStopRequested(control)
-          const mediaKey = this.getMediaCacheKey(msg)
+          const mediaKey = getMediaCacheKey(msg)
           if (!mediaCache.has(mediaKey)) {
             const mediaItem = await this.exportMediaForMessage(msg, sessionId, mediaRootDir, mediaRelativePrefix, {
               exportImages: options.exportImages,
@@ -5662,7 +5662,7 @@ export class ExportService {
         await parallelLimit(voiceMessages, VOICE_CONCURRENCY, async (msg) => {
           this.throwIfStopRequested(control)
           const transcript = await this.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername)
-          voiceTranscriptMap.set(this.getStableMessageKey(msg), transcript)
+          voiceTranscriptMap.set(getStableMessageKey(msg), transcript)
           voiceTranscribed++
           onProgress?.({
             current: 35,
@@ -5678,7 +5678,7 @@ export class ExportService {
 
       // ========== 预加载群昵称（用于名称显示偏好） ==========
       const groupNicknameCandidates = isGroup
-        ? this.buildGroupNicknameIdCandidates([
+        ? buildGroupNicknameIdCandidates([
           ...Array.from(senderUsernames.values()),
           ...collected.rows.map(msg => msg.senderUsername),
           cleanedMyWxid
@@ -5719,11 +5719,11 @@ export class ExportService {
         const source = sourceMatch ? sourceMatch[0] : ''
 
         let content: string | null
-        const mediaKey = this.getMediaCacheKey(msg)
+        const mediaKey = getMediaCacheKey(msg)
         const mediaItem = mediaCache.get(mediaKey)
 
         if (msg.localType === 34 && options.exportVoiceAsText) {
-          content = voiceTranscriptMap.get(this.getStableMessageKey(msg)) || '[语音消息 - 转文字失败]'
+          content = voiceTranscriptMap.get(getStableMessageKey(msg)) || '[语音消息 - 转文字失败]'
         } else if (mediaItem && msg.localType !== 47) {
           content = mediaItem.relativePath
         } else {
@@ -5892,7 +5892,7 @@ export class ExportService {
           return resolved
         }
 
-        const transferConcurrency = this.getClampedConcurrency(options.exportConcurrency, 4, 8)
+        const transferConcurrency = getClampedConcurrency(options.exportConcurrency, 4, 8)
         await parallelLimit(transferCandidates, transferConcurrency, async (item) => {
           this.throwIfStopRequested(control)
           const transferDesc = await this.resolveTransferDesc(
@@ -6100,7 +6100,7 @@ export class ExportService {
         if (isGroup) {
           const memberUsernames = Array.from(collected.memberSet.keys()).filter(Boolean)
           await this.preloadContacts(memberUsernames, contactCache)
-          const friendLookupUsernames = this.buildGroupNicknameIdCandidates(memberUsernames)
+          const friendLookupUsernames = buildGroupNicknameIdCandidates(memberUsernames)
           const friendFlagMap = await this.queryFriendFlagMap(friendLookupUsernames)
           const groupStatsResult = await wcdbService.getGroupStats(sessionId, 0, 0)
           const groupSenderCountMap = groupStatsResult.success && groupStatsResult.data
@@ -6144,7 +6144,7 @@ export class ExportService {
               nickname,
               remark,
               alias,
-              isFriend: this.buildGroupNicknameIdCandidates([memberWxid]).some((candidate) => friendFlagMap.get(candidate) === true),
+              isFriend: buildGroupNicknameIdCandidates([memberWxid]).some((candidate) => friendFlagMap.get(candidate) === true),
               messageCount: this.sumSenderCountsByIdentity(groupSenderCountMap, memberWxid)
             }
             if (groupNickname) groupMember.groupNickname = groupNickname
@@ -6213,10 +6213,10 @@ export class ExportService {
 
       return { success: true }
     } catch (e) {
-      if (this.isStopError(e)) {
+      if (isStopError(e)) {
         return { success: false, error: '导出任务已停止' }
       }
-      if (this.isPauseError(e)) {
+      if (isPauseError(e)) {
         return { success: false, error: '导出任务已暂停' }
       }
       return { success: false, error: String(e) }
@@ -6434,7 +6434,7 @@ export class ExportService {
 
       // 预加载群昵称 (仅群聊且完整列模式)
       const groupNicknameCandidates = isGroup
-        ? this.buildGroupNicknameIdCandidates([
+        ? buildGroupNicknameIdCandidates([
           ...collected.rows.map(msg => msg.senderUsername),
           cleanedMyWxid,
           rawMyWxid
@@ -6480,11 +6480,11 @@ export class ExportService {
           estimatedTotalMessages: totalMessages
         })
 
-        const mediaConcurrency = this.getClampedConcurrency(options.exportConcurrency)
+        const mediaConcurrency = getClampedConcurrency(options.exportConcurrency)
         let mediaExported = 0
         await parallelLimit(mediaMessages, mediaConcurrency, async (msg) => {
           this.throwIfStopRequested(control)
-          const mediaKey = this.getMediaCacheKey(msg)
+          const mediaKey = getMediaCacheKey(msg)
           if (!mediaCache.has(mediaKey)) {
             const mediaItem = await this.exportMediaForMessage(msg, sessionId, mediaRootDir, mediaRelativePrefix, {
               exportImages: options.exportImages,
@@ -6540,7 +6540,7 @@ export class ExportService {
         await parallelLimit(voiceMessages, VOICE_CONCURRENCY, async (msg) => {
           this.throwIfStopRequested(control)
           const transcript = await this.transcribeVoice(sessionId, String(msg.localId), msg.createTime, msg.senderUsername)
-          voiceTranscriptMap.set(this.getStableMessageKey(msg), transcript)
+          voiceTranscriptMap.set(getStableMessageKey(msg), transcript)
           voiceTranscribed++
           onProgress?.({
             current: 50,
@@ -6644,7 +6644,7 @@ export class ExportService {
         const row = worksheet.getRow(currentRow)
         row.height = 24
 
-        const mediaKey = this.getMediaCacheKey(msg)
+        const mediaKey = getMediaCacheKey(msg)
         const mediaItem = mediaCache.get(mediaKey)
         const shouldUseTranscript = msg.localType === 34 && options.exportVoiceAsText
         const contentValue = shouldUseTranscript
@@ -6652,7 +6652,7 @@ export class ExportService {
             msg.content,
             msg.localType,
             options,
-            voiceTranscriptMap.get(this.getStableMessageKey(msg)),
+            voiceTranscriptMap.get(getStableMessageKey(msg)),
             cleanedMyWxid,
             msg.senderUsername,
             msg.isSend,
@@ -6663,7 +6663,7 @@ export class ExportService {
               msg.content,
               msg.localType,
               options,
-              voiceTranscriptMap.get(this.getStableMessageKey(msg)),
+              voiceTranscriptMap.get(getStableMessageKey(msg)),
               cleanedMyWxid,
               msg.senderUsername,
               msg.isSend,
@@ -6776,10 +6776,10 @@ export class ExportService {
 
       return { success: true }
     } catch (e) {
-      if (this.isStopError(e)) {
+      if (isStopError(e)) {
         return { success: false, error: '导出任务已停止' }
       }
-      if (this.isPauseError(e)) {
+      if (isPauseError(e)) {
         return { success: false, error: '导出任务已暂停' }
       }
       // 处理文件被占用的错误
@@ -7368,30 +7368,6 @@ export class ExportService {
   private async copyMediaWithCacheAndDedup(kind: 'image' | 'video' | 'emoji', sourcePath: string, destPath: string, control?: ExportTaskControl): Promise<{ success: boolean; code?: string }> { return this.mediaRuntime.copyMediaWithCacheAndDedup(kind, sourcePath, destPath, control) }
   private triggerMediaFileCacheCleanup(force = false): void { this.mediaRuntime.triggerMediaFileCacheCleanup(force) }
   private async cleanupMediaFileCache(): Promise<void> { return this.mediaRuntime.cleanupMediaFileCache() }
-
-  async exportSessionToChatLab(...args: Parameters<typeof exportChatLabMixin.exportSessionToChatLab>): ReturnType<typeof exportChatLabMixin.exportSessionToChatLab> {
-    return exportChatLabMixin.exportSessionToChatLab.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
-  }
-
-  async exportSessionToDetailedJson(...args: Parameters<typeof exportJsonMixin.exportSessionToDetailedJson>): ReturnType<typeof exportJsonMixin.exportSessionToDetailedJson> {
-    return exportJsonMixin.exportSessionToDetailedJson.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
-  }
-
-  async exportSessionToExcel(...args: Parameters<typeof exportExcelMixin.exportSessionToExcel>): ReturnType<typeof exportExcelMixin.exportSessionToExcel> {
-    return exportExcelMixin.exportSessionToExcel.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
-  }
-
-  async exportSessionToTxt(...args: Parameters<typeof exportTxtMixin.exportSessionToTxt>): ReturnType<typeof exportTxtMixin.exportSessionToTxt> {
-    return exportTxtMixin.exportSessionToTxt.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
-  }
-
-  async exportSessionToWeCloneCsv(...args: Parameters<typeof exportWeCloneMixin.exportSessionToWeCloneCsv>): ReturnType<typeof exportWeCloneMixin.exportSessionToWeCloneCsv> {
-    return exportWeCloneMixin.exportSessionToWeCloneCsv.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
-  }
-
-  async exportSessionToHtml(...args: Parameters<typeof exportHtmlMixin.exportSessionToHtml>): ReturnType<typeof exportHtmlMixin.exportSessionToHtml> {
-    return exportHtmlMixin.exportSessionToHtml.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
-  }
 
   /**
    * 测试 Rust HTML 导出功能

@@ -191,7 +191,7 @@ class GroupSummaryRecordService {
           sessionId: String(record.sessionId || ''),
           displayName: String(record.displayName || record.sessionId || ''),
           avatarUrl: record.avatarUrl,
-          triggerType: record.triggerType === 'auto' ? 'auto' : 'manual',
+          triggerType: (record.triggerType === 'auto' ? 'auto' : 'manual') as GroupSummaryTriggerType,
           periodStart: this.normalizeTimestampSeconds(record.periodStart),
           periodEnd: this.normalizeTimestampSeconds(record.periodEnd),
           messageCount: Math.max(0, Math.floor(Number(record.messageCount || 0))),
