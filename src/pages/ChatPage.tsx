@@ -874,7 +874,8 @@ function ChatPage(props: ChatPageProps) {
     const cachedDates = messageDatesCache.current.get(normalizedSessionId)
     if (cachedDates) {
       setMessageDates(new Set(cachedDates))
-      setHasLoadedMessageDates(true)
+      // 只有当缓存中有消息日期数据时才标记为已加载
+      setHasLoadedMessageDates(cachedDates.size > 0)
       setLoadingDates(false)
     } else {
       setLoadingDates(true)
@@ -889,7 +890,8 @@ function ChatPage(props: ChatPageProps) {
           const dateSet = new Set<string>(result.dates)
           messageDatesCache.current.set(normalizedSessionId, dateSet)
           setMessageDates(new Set(dateSet))
-          setHasLoadedMessageDates(true)
+          // 只有当有消息日期数据时才标记为已加载，空数组时不设置，让用户可以选择任意日期
+          setHasLoadedMessageDates(dateSet.size > 0)
         }
       } catch (error) {
         console.error('获取消息日期失败:', error)
