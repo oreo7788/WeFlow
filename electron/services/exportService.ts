@@ -151,6 +151,18 @@ export class ExportService {
     return error
   }
 
+  private createProgressEmitter(onProgress?: (progress: ExportProgress) => void) {
+    return createProgressEmitter(onProgress)
+  }
+
+  private normalizeFileNamingMode(value: unknown): 'classic' | 'date-range' {
+    return normalizeFileNamingMode(value)
+  }
+
+  private buildSessionExportBaseName(sessionId: string, displayName: string, options: ExportOptions): string {
+    return buildSessionExportBaseName(sessionId, displayName, options)
+  }
+
   setRuntimeConfig(config: { dbPath?: string; decryptKey?: string; myWxid?: string; imageXorKey?: unknown; imageAesKey?: string; resourcesPath?: string; appPath?: string; isPackaged?: boolean } | null): void {
     this.runtimeConfig = config
     imageDecryptService.setRuntimeConfig({
@@ -7419,6 +7431,34 @@ export class ExportService {
 
   async getExportStats(...args: Parameters<typeof exportSessionsMixin.getExportStats>): ReturnType<typeof exportSessionsMixin.getExportStats> {
     return exportSessionsMixin.getExportStats.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
+  }
+
+  async exportSessionToHtml(...args: Parameters<typeof exportHtmlMixin.exportSessionToHtml>): ReturnType<typeof exportHtmlMixin.exportSessionToHtml> {
+    return exportHtmlMixin.exportSessionToHtml.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
+  }
+
+  async exportSessionToChatLab(...args: Parameters<typeof exportChatLabMixin.exportSessionToChatLab>): ReturnType<typeof exportChatLabMixin.exportSessionToChatLab> {
+    return exportChatLabMixin.exportSessionToChatLab.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
+  }
+
+  async exportSessionToDetailedJson(...args: Parameters<typeof exportJsonMixin.exportSessionToDetailedJson>): ReturnType<typeof exportJsonMixin.exportSessionToDetailedJson> {
+    return exportJsonMixin.exportSessionToDetailedJson.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
+  }
+
+  async exportSessionToExcel(...args: Parameters<typeof exportExcelMixin.exportSessionToExcel>): ReturnType<typeof exportExcelMixin.exportSessionToExcel> {
+    return exportExcelMixin.exportSessionToExcel.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
+  }
+
+  async exportSessionToExcelStreaming(...args: Parameters<typeof exportExcelMixin.exportSessionToExcelStreaming>): ReturnType<typeof exportExcelMixin.exportSessionToExcelStreaming> {
+    return exportExcelMixin.exportSessionToExcelStreaming.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
+  }
+
+  async exportSessionToTxt(...args: Parameters<typeof exportTxtMixin.exportSessionToTxt>): ReturnType<typeof exportTxtMixin.exportSessionToTxt> {
+    return exportTxtMixin.exportSessionToTxt.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
+  }
+
+  async exportSessionToWeCloneCsv(...args: Parameters<typeof exportWeCloneMixin.exportSessionToWeCloneCsv>): ReturnType<typeof exportWeCloneMixin.exportSessionToWeCloneCsv> {
+    return exportWeCloneMixin.exportSessionToWeCloneCsv.apply(this as unknown as import('./exportWriterContext').ExportWriterHost, args)
   }
 }
 

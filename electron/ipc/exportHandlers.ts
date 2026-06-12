@@ -107,7 +107,7 @@ export function registerExportHandlers(ctx: MainIpcContext) {
       ? join(process.resourcesPath, 'resources')
       : join(app.getAppPath(), 'resources')
     const userDataPath = app.getPath('userData')
-    const workerPath = join(__dirname, '../exportWorker.js')
+    const workerPath = join(__dirname, 'exportWorker.js')
 
     const runWorker = async () => {
       return await new Promise<any>((resolve, reject) => {
@@ -238,7 +238,7 @@ export function registerExportHandlers(ctx: MainIpcContext) {
     const cfg = ctx.getConfigService() || new ConfigService()
     ctx.setConfigService(cfg)
     const imageKeys = cfg.getImageKeysForCurrentWxid()
-    const workerPath = join(__dirname, '../exportWorker.js')
+    const workerPath = join(__dirname, 'exportWorker.js')
 
     try {
       return await new Promise<any>((resolve) => {
@@ -308,7 +308,7 @@ export function registerExportHandlers(ctx: MainIpcContext) {
   ipcMain.handle('export:exportContacts', async (_, outputDir: string, options: any) => {
     const cfg = ctx.getConfigService() || new ConfigService()
     ctx.setConfigService(cfg)
-    const workerPath = join(__dirname, '../exportWorker.js')
+    const workerPath = join(__dirname, 'exportWorker.js')
 
     try {
       return await new Promise<any>((resolve) => {
