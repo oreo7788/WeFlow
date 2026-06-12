@@ -8,11 +8,31 @@
  * - 调用 Rust 生成 HTML
  */
 
-import { existsSync, copyFileSync, mkdirSync, statSync } from 'fs'
+import { existsSync, copyFileSync, mkdirSync, statSync, readFileSync, writeFileSync } from 'fs'
 import { join, dirname, basename, extname } from 'path'
 import { imageDecryptService } from './imageDecryptService'
 import { wcdbService } from './wcdbService'
 import { ConfigService } from './config'
+
+// 媒体映射文件名称
+const MEDIA_MAPPING_FILE = 'media-mapping.json'
+
+// 媒体映射数据结构
+interface MediaMapping {
+  version: string
+  exportedAt: number
+  sessionId: string
+  mediaFiles: Record<string, MediaFileInfo> // key: messageId_type_hash
+}
+
+interface MediaFileInfo {
+  type: 'image' | 'video' | 'voice' | 'file'
+  sourcePath: string // 原始路径/MD5
+  destPath: string // 导出的相对路径 ./media/xxx.jpg
+  fileName: string // 文件名
+  fileSize: number
+  exportedAt: number
+}
 
 // Rust 模块（从 nativeExport.ts 导入）
 let rustModule: any = null
@@ -130,11 +150,11 @@ export async function exportHtmlViaRust(
       configService
     )
 
-    // 3. 导出媒体文件
+    // 3. 导出媒体文件（支持增量导出）
     let exportedMediaCount = 0
     if (options.includeMedia) {
       onProgress?.({ phase: 'exporting-media', current: 20, total: 100, message: '导出媒体文件...' })
-      exportedMediaCount = await exportMediaFiles(
+      const mediaResult = await exportMediaFiles(
         exportMessages,
         options,
         dirname(options.outputPath),
@@ -147,6 +167,7 @@ export async function exportHtmlViaRust(
           })
         }
       )
+      exportedMediaCount = mediaResult.exportedCount + mediaResult.reusedCount
     }
 
     // 4. 调用 Rust 生成 HTML
@@ -333,20 +354,77 @@ async function prepareMessages(
 }
 
 /**
- * 导出媒体文件
+ * 加载媒体映射文件
+ */
+function loadMediaMapping(outputDir: string, sessionId: string): MediaMapping {
+  const mappingPath = join(outputDir, MEDIA_MAPPING_FILE)
+  if (existsSync(mappingPath)) {
+    try {
+      const content = readFileSync(mappingPath, 'utf-8')
+      const mapping = JSON.parse(content) as MediaMapping
+      // 验证映射是否属于当前会话
+      if (mapping.sessionId === sessionId) {
+        console.log(`[📂 Rust HTML Export] 加载已有媒体映射，包含 ${Object.keys(mapping.mediaFiles).length} 个文件`)
+        return mapping
+      }
+    } catch (e) {
+      console.warn('[⚠️ Rust HTML Export] 加载媒体映射失败:', e)
+    }
+  }
+  return {
+    version: '1.0',
+    exportedAt: Date.now(),
+    sessionId,
+    mediaFiles: {}
+  }
+}
+
+/**
+ * 保存媒体映射文件
+ */
+function saveMediaMapping(outputDir: string, mapping: MediaMapping): void {
+  const mappingPath = join(outputDir, MEDIA_MAPPING_FILE)
+  mapping.exportedAt = Date.now()
+  try {
+    writeFileSync(mappingPath, JSON.stringify(mapping, null, 2), 'utf-8')
+    console.log(`[💾 Rust HTML Export] 保存媒体映射，共 ${Object.keys(mapping.mediaFiles).length} 个文件`)
+  } catch (e) {
+    console.warn('[⚠️ Rust HTML Export] 保存媒体映射失败:', e)
+  }
+}
+
+/**
+ * 生成媒体文件唯一标识（用于增量导出）
+ */
+function generateMediaKey(msg: ExportMessage, type: 'image' | 'video' | 'voice' | 'file'): string {
+  // 使用消息ID + 类型 + 原始路径/MD5 的组合作为唯一标识
+  const source = type === 'image' ? msg.imagePath :
+                type === 'video' ? msg.videoPath :
+                type === 'voice' ? msg.voicePath :
+                msg.filePath || ''
+  return `${msg.localId}_${type}_${source || 'unknown'}`
+}
+
+/**
+ * 导出媒体文件 - 支持增量导出
  */
 async function exportMediaFiles(
   messages: ExportMessage[],
   options: HtmlExportOptions,
   outputDir: string,
   onProgress: (current: number, total: number) => void
-): Promise<number> {
+): Promise<{ exportedCount: number; reusedCount: number }> {
   const mediaDir = join(outputDir, 'media')
   if (!existsSync(mediaDir)) {
     mkdirSync(mediaDir, { recursive: true })
   }
 
+  // 加载已有的媒体映射
+  const mapping = loadMediaMapping(outputDir, options.sessionId)
+  const existingMedia = mapping.mediaFiles
+
   let exportedCount = 0
+  let reusedCount = 0
   const maxSize = (options.maxFileSizeMb || 100) * 1024 * 1024
 
   for (let i = 0; i < messages.length; i++) {
@@ -355,6 +433,25 @@ async function exportMediaFiles(
 
     // 导出图片
     if (options.exportImages !== false && msg.imagePath) {
+      const mediaKey = generateMediaKey(msg, 'image')
+
+      // 检查是否已存在
+      if (existingMedia[mediaKey]) {
+        const mediaInfo = existingMedia[mediaKey]
+        const fullDestPath = join(outputDir, mediaInfo.destPath)
+
+        // 验证文件是否仍然存在
+        if (existsSync(fullDestPath)) {
+          // 复用已有的媒体文件
+          msg.imageLocalPath = mediaInfo.destPath
+          reusedCount++
+          continue
+        } else {
+          // 文件已被删除，从映射中移除
+          delete existingMedia[mediaKey]
+        }
+      }
+
       try {
         // 尝试解密图片
         const decryptResult = await imageDecryptService.decryptImage({
@@ -374,9 +471,21 @@ async function exportMediaFiles(
             const ext = extname(localPath) || '.jpg'
             const destName = `img_${msg.localId}_${Date.now()}${ext}`
             const destPath = join(mediaDir, destName)
+            const relativeDestPath = `./media/${destName}`
 
             copyFileSync(localPath, destPath)
-            msg.imageLocalPath = `./media/${destName}`
+            msg.imageLocalPath = relativeDestPath
+
+            // 记录到映射
+            existingMedia[mediaKey] = {
+              type: 'image',
+              sourcePath: msg.imagePath,
+              destPath: relativeDestPath,
+              fileName: destName,
+              fileSize: stats.size,
+              exportedAt: Date.now()
+            }
+
             exportedCount++
           }
         }
@@ -385,10 +494,14 @@ async function exportMediaFiles(
       }
     }
 
-    // TODO: 导出视频、语音、文件等
+    // TODO: 导出视频、语音、文件等（同样的增量逻辑）
   }
 
-  return exportedCount
+  // 保存更新后的媒体映射
+  saveMediaMapping(outputDir, mapping)
+
+  console.log(`[📊 Rust HTML Export] 媒体导出完成: 新增 ${exportedCount} 个，复用 ${reusedCount} 个`)
+  return { exportedCount, reusedCount }
 }
 
 /**
